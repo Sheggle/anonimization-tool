@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Anonymizer</title>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>PDF Anonymizer</h1>
+            <p>Genuinely remove sensitive information from PDFs - text is deleted, not just hidden</p>
+        </header>
+
+        <div id="status" class="status"></div>
+
+        <div class="grid">
+            <!-- File Upload -->
+            <div class="card">
+                <h2>1. Upload PDF</h2>
+                <div class="upload-zone" id="uploadZone">
+                    <input type="file" id="fileInput" accept=".pdf">
+                    <div class="icon">📄</div>
+                    <p>Click or drag PDF here</p>
+                </div>
+                <div class="file-info" id="fileInfo">
+                    <strong id="fileName"></strong><br>
+                    <span id="pageCount"></span>
+                </div>
+            </div>
+
+            <!-- Terms Input -->
+            <div class="card">
+                <h2>2. Terms to Redact</h2>
+                <textarea
+                    class="terms-input"
+                    id="termsInput"
+                    placeholder="Enter terms to redact (one per line)
+
+Examples:
+\bJan\b
+Voorbeeldstraat
+<bsn>
+<email>"
+                ></textarea>
+                <details class="pattern-help">
+                    <summary>Syntax help</summary>
+                    <ul>
+                        <li><code>\bword\b</code> - Whole word only (won't match inside other words)</li>
+                        <li><code>Jan|John</code> - Match either Jan or John</li>
+                        <li><code>&lt;bsn&gt;</code> - Dutch BSN numbers (validated)</li>
+                        <li><code>&lt;email&gt;</code> - Email addresses</li>
+                        <li><code>&lt;phone&gt;</code> - Phone numbers</li>
+                        <li><code>&lt;iban&gt;</code> - IBAN numbers</li>
+                        <li><code>&lt;date&gt;</code> - Dates (DD-MM-YYYY etc)</li>
+                        <li><code>&lt;postcode&gt;</code> - Dutch postcodes</li>
+                    </ul>
+                </details>
+            </div>
+
+            <!-- Preview -->
+            <div class="card preview-container" id="previewCard">
+                <h2>3. Preview</h2>
+                <div id="previewPlaceholder">
+                    <p style="color: var(--text-muted);">Upload a PDF and enter terms to see matches</p>
+                </div>
+                <div class="preview-scroll hidden" id="previewScroll"></div>
+                <div class="match-list hidden" id="matchList">
+                    <h3 style="font-size: 0.9rem; margin-bottom: 0.5rem;">Matches found: <span id="matchCount">0</span></h3>
+                    <div id="matchItems"></div>
+                </div>
+            </div>
+
+            <!-- Actions -->
+            <div class="actions">
+                <button id="scanBtn" disabled>Scan for Matches</button>
+                <button id="processBtn" disabled>Anonymize & Download</button>
+                <label class="checkbox-label">
+                    <input type="checkbox" id="ocrCheckbox">
+                    OCR (scanned PDFs)
+                </label>
+                <div class="progress-container hidden" id="progressContainer">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progressFill"></div>
+                    </div>
+                    <div class="progress-text" id="progressText">Processing...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module" src="/main.js"></script>
+</body>
+</html>

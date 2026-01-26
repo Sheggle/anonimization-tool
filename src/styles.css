@@ -1,0 +1,383 @@
+:root {
+    --bg: #1a1a2e;
+    --surface: #16213e;
+    --primary: #e94560;
+    --text: #eee;
+    --text-muted: #888;
+    --border: #333;
+    --success: #4ade80;
+    --warning: #fbbf24;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    line-height: 1.5;
+}
+
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 2rem;
+}
+
+header {
+    text-align: center;
+    margin-bottom: 2rem;
+}
+
+header h1 {
+    font-size: 2rem;
+    margin-bottom: 0.5rem;
+}
+
+header p {
+    color: var(--text-muted);
+}
+
+.grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2rem;
+}
+
+@media (max-width: 800px) {
+    .grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+.card {
+    background: var(--surface);
+    border-radius: 12px;
+    padding: 1.5rem;
+}
+
+.card h2 {
+    font-size: 1.1rem;
+    margin-bottom: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+/* File Upload */
+.upload-zone {
+    border: 2px dashed var(--border);
+    border-radius: 8px;
+    padding: 2rem;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+}
+
+.upload-zone:hover,
+.upload-zone.dragover {
+    border-color: var(--primary);
+    background: rgba(233, 69, 96, 0.1);
+}
+
+.upload-zone input {
+    display: none;
+}
+
+.upload-zone .icon {
+    font-size: 2rem;
+    margin-bottom: 0.5rem;
+}
+
+.file-info {
+    margin-top: 1rem;
+    padding: 0.75rem;
+    background: rgba(74, 222, 128, 0.1);
+    border-radius: 6px;
+    font-size: 0.9rem;
+    display: none;
+}
+
+.file-info.visible {
+    display: block;
+}
+
+/* Terms Input */
+.terms-input {
+    width: 100%;
+    min-height: 150px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    color: var(--text);
+    font-family: monospace;
+    font-size: 0.9rem;
+    resize: vertical;
+}
+
+.terms-input:focus {
+    outline: none;
+    border-color: var(--primary);
+}
+
+.pattern-help {
+    margin-top: 1rem;
+    font-size: 0.85rem;
+}
+
+.pattern-help summary {
+    cursor: pointer;
+    color: var(--text-muted);
+}
+
+.pattern-help ul {
+    margin-top: 0.5rem;
+    padding-left: 1.5rem;
+}
+
+.pattern-help code {
+    background: var(--bg);
+    padding: 0.1rem 0.4rem;
+    border-radius: 4px;
+    color: var(--primary);
+}
+
+/* Preview */
+.preview-container {
+    grid-column: 1 / -1;
+}
+
+.preview-scroll {
+    max-height: 500px;
+    overflow-y: auto;
+    background: var(--bg);
+    border-radius: 8px;
+    padding: 1rem;
+}
+
+.page-preview {
+    margin-bottom: 1rem;
+    position: relative;
+}
+
+.page-preview canvas {
+    width: 100%;
+    border-radius: 4px;
+    background: white;
+    cursor: crosshair;
+}
+
+.page-label {
+    position: absolute;
+    top: 0.5rem;
+    left: 0.5rem;
+    background: rgba(0,0,0,0.7);
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.8rem;
+}
+
+.match-overlay {
+    position: absolute;
+    background: rgba(233, 69, 96, 0.4);
+    border: 2px solid var(--primary);
+    pointer-events: none;
+}
+
+/* Interactive manual overlays */
+.match-overlay.manual-overlay {
+    pointer-events: auto;
+    cursor: pointer;
+}
+
+.match-overlay.manual-overlay:hover {
+    background: rgba(233, 69, 96, 0.6);
+}
+
+/* Delete button for manual overlays */
+.overlay-delete-btn {
+    position: absolute;
+    top: -8px;
+    right: -8px;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--primary);
+    color: white;
+    border: 2px solid white;
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+}
+
+.match-overlay.manual-overlay:hover .overlay-delete-btn {
+    display: flex;
+}
+
+.overlay-delete-btn:hover {
+    background: #c73850;
+}
+
+/* Drawing preview rectangle */
+.draw-preview {
+    position: absolute;
+    border: 2px dashed var(--primary);
+    background: rgba(233, 69, 96, 0.2);
+    pointer-events: none;
+    z-index: 10;
+}
+
+/* Match List */
+.match-list {
+    margin-top: 1rem;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.match-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.5rem;
+    background: var(--bg);
+    border-radius: 4px;
+    margin-bottom: 0.5rem;
+    font-size: 0.85rem;
+}
+
+.match-term {
+    color: var(--primary);
+    font-family: monospace;
+}
+
+.match-page {
+    color: var(--text-muted);
+}
+
+/* Actions */
+.actions {
+    grid-column: 1 / -1;
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.ocr-label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+}
+
+button {
+    background: var(--primary);
+    color: white;
+    border: none;
+    padding: 0.75rem 1.5rem;
+    border-radius: 8px;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: opacity 0.2s, transform 0.1s;
+}
+
+button:hover:not(:disabled) {
+    opacity: 0.9;
+}
+
+button:active:not(:disabled) {
+    transform: scale(0.98);
+}
+
+button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+button.secondary {
+    background: var(--surface);
+    border: 1px solid var(--border);
+}
+
+/* Progress */
+.progress-container {
+    flex: 1;
+    min-width: 200px;
+}
+
+.progress-bar {
+    height: 8px;
+    background: var(--bg);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.progress-fill {
+    height: 100%;
+    background: var(--primary);
+    width: 0%;
+    transition: width 0.3s;
+}
+
+.progress-text {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    margin-top: 0.25rem;
+}
+
+/* Status Messages */
+.status {
+    padding: 1rem;
+    border-radius: 8px;
+    margin-bottom: 1rem;
+    display: none;
+}
+
+.status.visible {
+    display: block;
+}
+
+.status.error {
+    background: rgba(239, 68, 68, 0.2);
+    border: 1px solid #ef4444;
+}
+
+.status.success {
+    background: rgba(74, 222, 128, 0.2);
+    border: 1px solid var(--success);
+}
+
+.status.loading {
+    background: rgba(251, 191, 36, 0.2);
+    border: 1px solid var(--warning);
+}
+
+/* Loading Spinner */
+.spinner {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--text-muted);
+    border-top-color: var(--primary);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    margin-right: 0.5rem;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+/* Hidden */
+.hidden {
+    display: none !important;
+}

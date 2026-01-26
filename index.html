@@ -1,0 +1,900 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Anonymizer</title>
+    <style>
+        :root {
+            --bg: #1a1a2e;
+            --surface: #16213e;
+            --primary: #e94560;
+            --text: #eee;
+            --text-muted: #888;
+            --border: #333;
+            --success: #4ade80;
+            --warning: #fbbf24;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            line-height: 1.5;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+
+        header h1 {
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+        }
+
+        header p {
+            color: var(--text-muted);
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
+        }
+
+        @media (max-width: 800px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .card {
+            background: var(--surface);
+            border-radius: 12px;
+            padding: 1.5rem;
+        }
+
+        .card h2 {
+            font-size: 1.1rem;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        /* File Upload */
+        .upload-zone {
+            border: 2px dashed var(--border);
+            border-radius: 8px;
+            padding: 2rem;
+            text-align: center;
+            cursor: pointer;
+            transition: border-color 0.2s, background 0.2s;
+        }
+
+        .upload-zone:hover,
+        .upload-zone.dragover {
+            border-color: var(--primary);
+            background: rgba(233, 69, 96, 0.1);
+        }
+
+        .upload-zone input {
+            display: none;
+        }
+
+        .upload-zone .icon {
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .file-info {
+            margin-top: 1rem;
+            padding: 0.75rem;
+            background: rgba(74, 222, 128, 0.1);
+            border-radius: 6px;
+            font-size: 0.9rem;
+            display: none;
+        }
+
+        .file-info.visible {
+            display: block;
+        }
+
+        /* Terms Input */
+        .terms-input {
+            width: 100%;
+            min-height: 150px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem;
+            color: var(--text);
+            font-family: monospace;
+            font-size: 0.9rem;
+            resize: vertical;
+        }
+
+        .terms-input:focus {
+            outline: none;
+            border-color: var(--primary);
+        }
+
+        .pattern-help {
+            margin-top: 1rem;
+            font-size: 0.85rem;
+        }
+
+        .pattern-help summary {
+            cursor: pointer;
+            color: var(--text-muted);
+        }
+
+        .pattern-help ul {
+            margin-top: 0.5rem;
+            padding-left: 1.5rem;
+        }
+
+        .pattern-help code {
+            background: var(--bg);
+            padding: 0.1rem 0.4rem;
+            border-radius: 4px;
+            color: var(--primary);
+        }
+
+        /* Preview */
+        .preview-container {
+            grid-column: 1 / -1;
+        }
+
+        .preview-scroll {
+            max-height: 500px;
+            overflow-y: auto;
+            background: var(--bg);
+            border-radius: 8px;
+            padding: 1rem;
+        }
+
+        .page-preview {
+            margin-bottom: 1rem;
+            position: relative;
+        }
+
+        .page-preview canvas {
+            width: 100%;
+            border-radius: 4px;
+            background: white;
+        }
+
+        .page-label {
+            position: absolute;
+            top: 0.5rem;
+            left: 0.5rem;
+            background: rgba(0,0,0,0.7);
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+        }
+
+        .match-overlay {
+            position: absolute;
+            background: rgba(233, 69, 96, 0.4);
+            border: 2px solid var(--primary);
+            pointer-events: none;
+        }
+
+        /* Match List */
+        .match-list {
+            margin-top: 1rem;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .match-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.5rem;
+            background: var(--bg);
+            border-radius: 4px;
+            margin-bottom: 0.5rem;
+            font-size: 0.85rem;
+        }
+
+        .match-term {
+            color: var(--primary);
+            font-family: monospace;
+        }
+
+        .match-page {
+            color: var(--text-muted);
+        }
+
+        /* Actions */
+        .actions {
+            grid-column: 1 / -1;
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        button {
+            background: var(--primary);
+            color: white;
+            border: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 8px;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: opacity 0.2s, transform 0.1s;
+        }
+
+        button:hover:not(:disabled) {
+            opacity: 0.9;
+        }
+
+        button:active:not(:disabled) {
+            transform: scale(0.98);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        button.secondary {
+            background: var(--surface);
+            border: 1px solid var(--border);
+        }
+
+        /* Progress */
+        .progress-container {
+            flex: 1;
+            min-width: 200px;
+        }
+
+        .progress-bar {
+            height: 8px;
+            background: var(--bg);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: var(--primary);
+            width: 0%;
+            transition: width 0.3s;
+        }
+
+        .progress-text {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            margin-top: 0.25rem;
+        }
+
+        /* Status Messages */
+        .status {
+            padding: 1rem;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+            display: none;
+        }
+
+        .status.visible {
+            display: block;
+        }
+
+        .status.error {
+            background: rgba(239, 68, 68, 0.2);
+            border: 1px solid #ef4444;
+        }
+
+        .status.success {
+            background: rgba(74, 222, 128, 0.2);
+            border: 1px solid var(--success);
+        }
+
+        .status.loading {
+            background: rgba(251, 191, 36, 0.2);
+            border: 1px solid var(--warning);
+        }
+
+        /* Loading Spinner */
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid var(--text-muted);
+            border-top-color: var(--primary);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 0.5rem;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Hidden */
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>PDF Anonymizer</h1>
+            <p>Genuinely remove sensitive information from PDFs - text is deleted, not just hidden</p>
+        </header>
+
+        <div id="status" class="status"></div>
+
+        <div class="grid">
+            <!-- File Upload -->
+            <div class="card">
+                <h2>1. Upload PDF</h2>
+                <div class="upload-zone" id="uploadZone">
+                    <input type="file" id="fileInput" accept=".pdf">
+                    <div class="icon">📄</div>
+                    <p>Click or drag PDF here</p>
+                </div>
+                <div class="file-info" id="fileInfo">
+                    <strong id="fileName"></strong><br>
+                    <span id="pageCount"></span>
+                </div>
+            </div>
+
+            <!-- Terms Input -->
+            <div class="card">
+                <h2>2. Terms to Redact</h2>
+                <textarea
+                    class="terms-input"
+                    id="termsInput"
+                    placeholder="Enter terms to redact (one per line)
+
+Examples:
+Jan
+Brugge
+Sagenlaan
+<bsn>
+<email>"
+                ></textarea>
+                <details class="pattern-help">
+                    <summary>Available patterns</summary>
+                    <ul>
+                        <li><code>&lt;bsn&gt;</code> - Dutch BSN numbers (with validation)</li>
+                        <li><code>&lt;email&gt;</code> - Email addresses</li>
+                        <li><code>&lt;phone&gt;</code> - Phone numbers</li>
+                        <li><code>&lt;iban&gt;</code> - IBAN numbers</li>
+                        <li><code>&lt;date&gt;</code> - Dates (various formats)</li>
+                    </ul>
+                </details>
+            </div>
+
+            <!-- Preview -->
+            <div class="card preview-container" id="previewCard">
+                <h2>3. Preview</h2>
+                <div id="previewPlaceholder">
+                    <p style="color: var(--text-muted);">Upload a PDF and enter terms to see matches</p>
+                </div>
+                <div class="preview-scroll hidden" id="previewScroll"></div>
+                <div class="match-list hidden" id="matchList">
+                    <h3 style="font-size: 0.9rem; margin-bottom: 0.5rem;">Matches found: <span id="matchCount">0</span></h3>
+                    <div id="matchItems"></div>
+                </div>
+            </div>
+
+            <!-- Actions -->
+            <div class="actions">
+                <button id="scanBtn" disabled>Scan for Matches</button>
+                <button id="processBtn" disabled>Anonymize & Download</button>
+                <label style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.9rem;">
+                    <input type="checkbox" id="ocrCheckbox">
+                    Enable OCR (for scanned PDFs)
+                </label>
+                <div class="progress-container hidden" id="progressContainer">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progressFill"></div>
+                    </div>
+                    <div class="progress-text" id="progressText">Processing...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        // MuPDF module - will be loaded dynamically
+        let mupdf = null;
+        let mupdfReady = false;
+
+        // State
+        let pdfDocument = null;
+        let pdfData = null;
+        let matches = [];
+        let pageImages = [];
+
+        // DOM Elements
+        const fileInput = document.getElementById('fileInput');
+        const uploadZone = document.getElementById('uploadZone');
+        const fileInfo = document.getElementById('fileInfo');
+        const fileName = document.getElementById('fileName');
+        const pageCount = document.getElementById('pageCount');
+        const termsInput = document.getElementById('termsInput');
+        const scanBtn = document.getElementById('scanBtn');
+        const processBtn = document.getElementById('processBtn');
+        const ocrCheckbox = document.getElementById('ocrCheckbox');
+        const previewPlaceholder = document.getElementById('previewPlaceholder');
+        const previewScroll = document.getElementById('previewScroll');
+        const matchList = document.getElementById('matchList');
+        const matchItems = document.getElementById('matchItems');
+        const matchCount = document.getElementById('matchCount');
+        const progressContainer = document.getElementById('progressContainer');
+        const progressFill = document.getElementById('progressFill');
+        const progressText = document.getElementById('progressText');
+        const statusEl = document.getElementById('status');
+
+        // Patterns
+        const PATTERNS = {
+            '<bsn>': {
+                regex: /\b\d{8,9}\b/g,
+                validate: (match) => isValidBSN(match)
+            },
+            '<email>': {
+                regex: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g,
+                validate: () => true
+            },
+            '<phone>': {
+                regex: /\b(?:\+31|0)[\s.-]?(?:\d[\s.-]?){9}\b/g,
+                validate: () => true
+            },
+            '<iban>': {
+                regex: /\b[A-Z]{2}\d{2}[A-Z]{4}\d{10}\b/g,
+                validate: () => true
+            },
+            '<date>': {
+                regex: /\b\d{1,2}[-\/\.]\d{1,2}[-\/\.]\d{2,4}\b/g,
+                validate: () => true
+            }
+        };
+
+        // BSN Validation (Dutch 11-check)
+        function isValidBSN(bsn) {
+            const digits = bsn.padStart(9, '0');
+            if (digits.length !== 9 || !/^\d{9}$/.test(digits)) return false;
+
+            const weights = [9, 8, 7, 6, 5, 4, 3, 2, -1];
+            let sum = 0;
+            for (let i = 0; i < 9; i++) {
+                sum += parseInt(digits[i]) * weights[i];
+            }
+            return sum % 11 === 0 && digits !== '000000000';
+        }
+
+        // Status helpers
+        function showStatus(message, type = 'loading') {
+            statusEl.className = `status visible ${type}`;
+            statusEl.innerHTML = type === 'loading'
+                ? `<span class="spinner"></span>${message}`
+                : message;
+        }
+
+        function hideStatus() {
+            statusEl.className = 'status';
+        }
+
+        function showProgress(percent, text) {
+            progressContainer.classList.remove('hidden');
+            progressFill.style.width = `${percent}%`;
+            progressText.textContent = text;
+        }
+
+        function hideProgress() {
+            progressContainer.classList.add('hidden');
+        }
+
+        // File upload handlers
+        uploadZone.addEventListener('click', () => fileInput.click());
+
+        uploadZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadZone.classList.add('dragover');
+        });
+
+        uploadZone.addEventListener('dragleave', () => {
+            uploadZone.classList.remove('dragover');
+        });
+
+        uploadZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length) {
+                handleFile(e.dataTransfer.files[0]);
+            }
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length) {
+                handleFile(e.target.files[0]);
+            }
+        });
+
+        async function handleFile(file) {
+            if (!file.name.toLowerCase().endsWith('.pdf')) {
+                showStatus('Please select a PDF file', 'error');
+                return;
+            }
+
+            if (!mupdfReady) {
+                showStatus('MuPDF library is still loading. Please wait...', 'loading');
+                return;
+            }
+
+            showStatus('Loading PDF...');
+
+            try {
+                pdfData = new Uint8Array(await file.arrayBuffer());
+                pdfDocument = mupdf.Document.openDocument(pdfData, "application/pdf");
+
+                const numPages = pdfDocument.countPages();
+
+                fileName.textContent = file.name;
+                pageCount.textContent = `${numPages} page${numPages !== 1 ? 's' : ''}`;
+                fileInfo.classList.add('visible');
+
+                scanBtn.disabled = false;
+                hideStatus();
+
+                // Generate previews
+                await generatePreviews();
+
+            } catch (err) {
+                console.error(err);
+                showStatus(`Error loading PDF: ${err.message}`, 'error');
+            }
+        }
+
+        async function generatePreviews() {
+            if (!pdfDocument) return;
+
+            previewPlaceholder.classList.add('hidden');
+            previewScroll.classList.remove('hidden');
+            previewScroll.innerHTML = '';
+            pageImages = [];
+
+            const numPages = pdfDocument.countPages();
+
+            for (let i = 0; i < numPages; i++) {
+                const page = pdfDocument.loadPage(i);
+                const bounds = page.getBounds();
+                const width = bounds[2] - bounds[0];
+                const height = bounds[3] - bounds[1];
+
+                // Render at reasonable scale for preview
+                const scale = Math.min(800 / width, 1.5);
+                const pixmap = page.toPixmap(
+                    mupdf.Matrix.scale(scale, scale),
+                    mupdf.ColorSpace.DeviceRGB,
+                    false,
+                    true
+                );
+
+                const imageData = pixmap.asImageData();
+                pageImages.push({ width, height, scale, bounds });
+
+                const container = document.createElement('div');
+                container.className = 'page-preview';
+                container.id = `page-${i}`;
+
+                const canvas = document.createElement('canvas');
+                canvas.width = imageData.width;
+                canvas.height = imageData.height;
+                const ctx = canvas.getContext('2d');
+                const imgData = new ImageData(
+                    new Uint8ClampedArray(imageData.data),
+                    imageData.width,
+                    imageData.height
+                );
+                ctx.putImageData(imgData, 0, 0);
+
+                const label = document.createElement('div');
+                label.className = 'page-label';
+                label.textContent = `Page ${i + 1}`;
+
+                container.appendChild(canvas);
+                container.appendChild(label);
+                previewScroll.appendChild(container);
+            }
+        }
+
+        // Term input handler
+        termsInput.addEventListener('input', () => {
+            // Enable scan button if we have both PDF and terms
+            scanBtn.disabled = !pdfDocument || !termsInput.value.trim();
+        });
+
+        // Scan for matches
+        scanBtn.addEventListener('click', async () => {
+            if (!pdfDocument || !termsInput.value.trim()) return;
+
+            showStatus('Scanning for matches...');
+            matches = [];
+
+            const terms = termsInput.value
+                .split('\n')
+                .map(t => t.trim())
+                .filter(t => t);
+
+            const numPages = pdfDocument.countPages();
+
+            for (let pageNum = 0; pageNum < numPages; pageNum++) {
+                showProgress((pageNum / numPages) * 100, `Scanning page ${pageNum + 1} of ${numPages}...`);
+
+                const page = pdfDocument.loadPage(pageNum);
+                const structuredText = page.toStructuredText("preserve-whitespace");
+                const textJson = JSON.parse(structuredText.asJSON());
+
+                // Extract words with bounding boxes
+                const words = [];
+                for (const block of textJson.blocks || []) {
+                    for (const line of block.lines || []) {
+                        for (const span of line.spans || []) {
+                            // Get text and bbox for this span
+                            const text = span.text || '';
+                            const bbox = span.bbox || line.bbox || block.bbox;
+
+                            if (text && bbox) {
+                                words.push({
+                                    text,
+                                    bbox,
+                                    pageNum
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Search for matches
+                for (const term of terms) {
+                    if (PATTERNS[term]) {
+                        // Pattern-based search
+                        const pattern = PATTERNS[term];
+                        for (const word of words) {
+                            const regex = new RegExp(pattern.regex.source, pattern.regex.flags);
+                            let match;
+                            while ((match = regex.exec(word.text)) !== null) {
+                                if (pattern.validate(match[0])) {
+                                    matches.push({
+                                        text: match[0],
+                                        term,
+                                        bbox: word.bbox,
+                                        pageNum
+                                    });
+                                }
+                            }
+                        }
+                    } else {
+                        // Literal search (case-insensitive)
+                        const termLower = term.toLowerCase();
+                        for (const word of words) {
+                            if (word.text.toLowerCase().includes(termLower)) {
+                                matches.push({
+                                    text: word.text,
+                                    term,
+                                    bbox: word.bbox,
+                                    pageNum
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Allow UI to update
+                await new Promise(r => setTimeout(r, 0));
+            }
+
+            // Update UI with matches
+            updateMatchDisplay();
+            hideProgress();
+
+            if (matches.length > 0) {
+                showStatus(`Found ${matches.length} match${matches.length !== 1 ? 'es' : ''} to redact`, 'success');
+                processBtn.disabled = false;
+            } else {
+                showStatus('No matches found. Try different search terms.', 'error');
+                processBtn.disabled = true;
+            }
+        });
+
+        function updateMatchDisplay() {
+            matchList.classList.remove('hidden');
+            matchCount.textContent = matches.length;
+            matchItems.innerHTML = '';
+
+            // Group by page
+            const byPage = {};
+            for (const match of matches) {
+                if (!byPage[match.pageNum]) byPage[match.pageNum] = [];
+                byPage[match.pageNum].push(match);
+            }
+
+            // Display matches
+            for (const [pageNum, pageMatches] of Object.entries(byPage)) {
+                for (const match of pageMatches.slice(0, 5)) { // Show max 5 per page
+                    const item = document.createElement('div');
+                    item.className = 'match-item';
+                    item.innerHTML = `
+                        <span class="match-term">"${escapeHtml(match.text)}"</span>
+                        <span class="match-page">Page ${parseInt(pageNum) + 1}</span>
+                    `;
+                    matchItems.appendChild(item);
+                }
+                if (pageMatches.length > 5) {
+                    const more = document.createElement('div');
+                    more.className = 'match-item';
+                    more.innerHTML = `<span style="color: var(--text-muted)">...and ${pageMatches.length - 5} more on page ${parseInt(pageNum) + 1}</span>`;
+                    matchItems.appendChild(more);
+                }
+            }
+
+            // Draw overlays on preview
+            drawMatchOverlays();
+        }
+
+        function drawMatchOverlays() {
+            // Remove existing overlays
+            document.querySelectorAll('.match-overlay').forEach(el => el.remove());
+
+            for (const match of matches) {
+                const pageContainer = document.getElementById(`page-${match.pageNum}`);
+                if (!pageContainer) continue;
+
+                const canvas = pageContainer.querySelector('canvas');
+                const pageInfo = pageImages[match.pageNum];
+                if (!pageInfo) continue;
+
+                const bbox = match.bbox;
+                const scale = pageInfo.scale;
+
+                // Convert PDF coordinates to canvas coordinates
+                // PDF coordinates: origin at bottom-left
+                // Canvas coordinates: origin at top-left
+                const x = bbox[0] * scale;
+                const y = bbox[1] * scale;  // MuPDF already uses top-left origin in JSON
+                const width = (bbox[2] - bbox[0]) * scale;
+                const height = (bbox[3] - bbox[1]) * scale;
+
+                // Scale to displayed size
+                const displayScale = canvas.offsetWidth / canvas.width;
+
+                const overlay = document.createElement('div');
+                overlay.className = 'match-overlay';
+                overlay.style.left = `${x * displayScale}px`;
+                overlay.style.top = `${y * displayScale}px`;
+                overlay.style.width = `${width * displayScale}px`;
+                overlay.style.height = `${height * displayScale}px`;
+
+                pageContainer.appendChild(overlay);
+            }
+        }
+
+        // Process and download
+        processBtn.addEventListener('click', async () => {
+            if (!pdfDocument || matches.length === 0) return;
+
+            showStatus('Applying redactions...');
+            processBtn.disabled = true;
+            scanBtn.disabled = true;
+
+            try {
+                // Reload document fresh for modifications
+                const doc = mupdf.Document.openDocument(pdfData, "application/pdf");
+                const numPages = doc.countPages();
+
+                // Group matches by page
+                const matchesByPage = {};
+                for (const match of matches) {
+                    if (!matchesByPage[match.pageNum]) matchesByPage[match.pageNum] = [];
+                    matchesByPage[match.pageNum].push(match);
+                }
+
+                // Apply redactions page by page
+                for (let pageNum = 0; pageNum < numPages; pageNum++) {
+                    showProgress((pageNum / numPages) * 100, `Redacting page ${pageNum + 1} of ${numPages}...`);
+
+                    const page = doc.loadPage(pageNum);
+                    const pageMatches = matchesByPage[pageNum] || [];
+
+                    for (const match of pageMatches) {
+                        // Create redaction annotation
+                        const annot = page.createAnnotation("Redact");
+                        annot.setRect(match.bbox);
+                    }
+
+                    // Apply all redactions on this page
+                    if (pageMatches.length > 0) {
+                        page.applyRedactions(true, 1); // black fill, image method 1
+                    }
+
+                    await new Promise(r => setTimeout(r, 0));
+                }
+
+                showProgress(90, 'Saving PDF...');
+
+                // Save the document
+                const output = doc.saveToBuffer("compress");
+                const outputData = output.asUint8Array();
+
+                // Download
+                const blob = new Blob([outputData], { type: 'application/pdf' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = fileName.textContent.replace('.pdf', '_anonymized.pdf');
+                a.click();
+                URL.revokeObjectURL(url);
+
+                hideProgress();
+                showStatus('PDF anonymized and downloaded successfully!', 'success');
+
+            } catch (err) {
+                console.error(err);
+                showStatus(`Error during redaction: ${err.message}`, 'error');
+            } finally {
+                processBtn.disabled = false;
+                scanBtn.disabled = false;
+            }
+        });
+
+        // Utility
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Handle window resize for overlay positions
+        window.addEventListener('resize', () => {
+            if (matches.length > 0) {
+                drawMatchOverlays();
+            }
+        });
+
+        // Initialize MuPDF
+        async function initMuPDF() {
+            showStatus('Loading MuPDF library (~10MB)...');
+
+            try {
+                // Dynamic import from jsDelivr CDN
+                const module = await import("https://cdn.jsdelivr.net/npm/mupdf@1.27.0/dist/mupdf.js");
+                mupdf = module;
+                mupdfReady = true;
+
+                hideStatus();
+                console.log('PDF Anonymizer loaded. MuPDF ready.');
+
+            } catch (err) {
+                console.error('Failed to load MuPDF:', err);
+                showStatus(`Failed to load MuPDF library: ${err.message}. Check console for details.`, 'error');
+            }
+        }
+
+        // Start initialization
+        initMuPDF();
+    </script>
+</body>
+</html>
