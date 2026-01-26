@@ -1022,7 +1022,11 @@ processBtn.addEventListener('click', async () => {
                     }
                 }
 
-                const image = new mupdf.Image(pixmap);
+                // Encode as JPEG to keep the PDF writer buffer small (~200KB
+                // per page instead of ~13MB raw). Stored as DCTDecode in the PDF.
+                const jpegData = pixmap.asJPEG(90);
+                pixmap.destroy();
+                const image = new mupdf.Image(jpegData);
                 const device = writer.beginPage(bounds);
                 const imgMatrix = [
                     bounds[2] - bounds[0], 0,
@@ -1032,7 +1036,6 @@ processBtn.addEventListener('click', async () => {
                 device.fillImage(image, imgMatrix, 1);
                 writer.endPage();
                 image.destroy();
-                pixmap.destroy();
             } else {
                 // No matches — pass through unchanged via page.run().
                 const device = writer.beginPage(bounds);
@@ -1049,7 +1052,9 @@ processBtn.addEventListener('click', async () => {
                         false,
                         true
                     );
-                    const image = new mupdf.Image(pixmap);
+                    const jpegData = pixmap.asJPEG(90);
+                    pixmap.destroy();
+                    const image = new mupdf.Image(jpegData);
                     const imgMatrix = [
                         bounds[2] - bounds[0], 0,
                         0, bounds[3] - bounds[1],
@@ -1057,7 +1062,6 @@ processBtn.addEventListener('click', async () => {
                     ];
                     device.fillImage(image, imgMatrix, 1);
                     image.destroy();
-                    pixmap.destroy();
                 }
                 writer.endPage();
             }
