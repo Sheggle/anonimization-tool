@@ -992,12 +992,13 @@ processBtn.addEventListener('click', async () => {
 
             if (pageMatches.length > 0) {
                 // Rasterize the page and burn black rectangles directly into pixels.
-                // This avoids both applyRedactions() and page.run()-to-PDF-writer,
-                // either of which can fail on JBIG2-encoded images. The toPixmap()
-                // rendering path handles JBIG2 fine. The output is a flat raster
-                // image — no text layer, no original image streams — so redacted
-                // content is genuinely destroyed.
-                const scale = 3; // 216 DPI for good quality
+                // This avoids applyRedactions() and page.run()-to-PDF-writer, both
+                // of which can fail on JBIG2-encoded images. The toPixmap() rendering
+                // path handles JBIG2 fine. The output is a flat raster image — no text
+                // layer, no original image streams — redacted content is destroyed.
+                const width = bounds[2] - bounds[0];
+                const height = bounds[3] - bounds[1];
+                const scale = Math.min(3, 4000 / Math.max(width, height));
                 const pixmap = page.toPixmap(
                     mupdf.Matrix.scale(scale, scale),
                     mupdf.ColorSpace.DeviceRGB,
@@ -1008,7 +1009,6 @@ processBtn.addEventListener('click', async () => {
                 const stride = pixmap.getStride();
                 const n = pixmap.getNumberOfComponents();
 
-                // Black out redacted regions directly in the pixel buffer
                 for (const match of pageMatches) {
                     const x0 = Math.floor((match.bbox[0] - bounds[0]) * scale);
                     const y0 = Math.floor((match.bbox[1] - bounds[1]) * scale);
@@ -1022,7 +1022,6 @@ processBtn.addEventListener('click', async () => {
                     }
                 }
 
-                // Write the rasterized page as an image
                 const image = new mupdf.Image(pixmap);
                 const device = writer.beginPage(bounds);
                 const imgMatrix = [
@@ -1032,16 +1031,20 @@ processBtn.addEventListener('click', async () => {
                 ];
                 device.fillImage(image, imgMatrix, 1);
                 writer.endPage();
+                image.destroy();
+                pixmap.destroy();
             } else {
                 // No matches — pass through unchanged via page.run().
-                // If this also fails on JBIG2 pages, fall back to rasterization.
                 const device = writer.beginPage(bounds);
                 try {
                     page.run(device, mupdf.Matrix.identity);
                 } catch (e) {
                     console.warn(`page.run failed on page ${pageNum + 1}, rasterizing: ${e.message}`);
+                    const w = bounds[2] - bounds[0];
+                    const h = bounds[3] - bounds[1];
+                    const s = Math.min(3, 4000 / Math.max(w, h));
                     const pixmap = page.toPixmap(
-                        mupdf.Matrix.scale(3, 3),
+                        mupdf.Matrix.scale(s, s),
                         mupdf.ColorSpace.DeviceRGB,
                         false,
                         true
@@ -1053,9 +1056,12 @@ processBtn.addEventListener('click', async () => {
                         bounds[0], bounds[1]
                     ];
                     device.fillImage(image, imgMatrix, 1);
+                    image.destroy();
+                    pixmap.destroy();
                 }
                 writer.endPage();
             }
+            page.destroy();
 
             await new Promise(r => setTimeout(r, 0));
         }
