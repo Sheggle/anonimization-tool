@@ -240,6 +240,9 @@ async function generatePreviews() {
 
         // Attach drawing handlers for manual redaction
         attachDrawingHandlers(container, i);
+
+        // Yield to let the browser paint each page progressively
+        await new Promise(r => setTimeout(r, 0));
     }
 }
 
@@ -765,55 +768,59 @@ function updateMatchDisplay() {
     drawMatchOverlays();
 }
 
+// Create and append a single overlay div for a match at the given index
+function createOverlayForMatch(match, index) {
+    const pageContainer = document.getElementById(`page-${match.pageNum}`);
+    if (!pageContainer) return;
+
+    const canvas = pageContainer.querySelector('canvas');
+    const pageInfo = pageImages[match.pageNum];
+    if (!pageInfo) return;
+
+    const bbox = match.bbox;
+    const scale = pageInfo.scale;
+
+    // Convert PDF coordinates to canvas coordinates
+    const x = bbox[0] * scale;
+    const y = bbox[1] * scale;
+    const width = (bbox[2] - bbox[0]) * scale;
+    const height = (bbox[3] - bbox[1]) * scale;
+
+    // Scale to displayed size
+    const displayScale = canvas.offsetWidth / canvas.width;
+
+    const overlay = document.createElement('div');
+    overlay.className = 'match-overlay';
+    if (match.isManual) {
+        overlay.classList.add('manual-overlay');
+    }
+    overlay.style.left = `${x * displayScale}px`;
+    overlay.style.top = `${y * displayScale}px`;
+    overlay.style.width = `${width * displayScale}px`;
+    overlay.style.height = `${height * displayScale}px`;
+
+    // Add delete button for manual overlays
+    if (match.isManual) {
+        const deleteBtn = document.createElement('button');
+        deleteBtn.className = 'overlay-delete-btn';
+        deleteBtn.innerHTML = '×';
+        deleteBtn.title = 'Remove this redaction';
+        deleteBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            removeManualRedaction(index);
+        });
+        overlay.appendChild(deleteBtn);
+    }
+
+    pageContainer.appendChild(overlay);
+}
+
 function drawMatchOverlays() {
     // Remove existing overlays
     document.querySelectorAll('.match-overlay').forEach(el => el.remove());
 
     for (let i = 0; i < matches.length; i++) {
-        const match = matches[i];
-        const pageContainer = document.getElementById(`page-${match.pageNum}`);
-        if (!pageContainer) continue;
-
-        const canvas = pageContainer.querySelector('canvas');
-        const pageInfo = pageImages[match.pageNum];
-        if (!pageInfo) continue;
-
-        const bbox = match.bbox;
-        const scale = pageInfo.scale;
-
-        // Convert PDF coordinates to canvas coordinates
-        const x = bbox[0] * scale;
-        const y = bbox[1] * scale;
-        const width = (bbox[2] - bbox[0]) * scale;
-        const height = (bbox[3] - bbox[1]) * scale;
-
-        // Scale to displayed size
-        const displayScale = canvas.offsetWidth / canvas.width;
-
-        const overlay = document.createElement('div');
-        overlay.className = 'match-overlay';
-        if (match.isManual) {
-            overlay.classList.add('manual-overlay');
-        }
-        overlay.style.left = `${x * displayScale}px`;
-        overlay.style.top = `${y * displayScale}px`;
-        overlay.style.width = `${width * displayScale}px`;
-        overlay.style.height = `${height * displayScale}px`;
-
-        // Add delete button for manual overlays
-        if (match.isManual) {
-            const deleteBtn = document.createElement('button');
-            deleteBtn.className = 'overlay-delete-btn';
-            deleteBtn.innerHTML = '×';
-            deleteBtn.title = 'Remove this redaction';
-            deleteBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                removeManualRedaction(i);
-            });
-            overlay.appendChild(deleteBtn);
-        }
-
-        pageContainer.appendChild(overlay);
+        createOverlayForMatch(matches[i], i);
     }
 }
 
@@ -827,7 +834,14 @@ function addManualRedaction(pageNum, bbox) {
         isManual: true
     };
     matches.push(match);
-    updateMatchDisplay();
+
+    // Incrementally append just the new overlay instead of rebuilding all overlays
+    createOverlayForMatch(match, matches.length - 1);
+
+    // Update the match list text (but skip the full drawMatchOverlays rebuild)
+    matchList.classList.remove('hidden');
+    matchCount.textContent = matches.length;
+
     processBtn.disabled = false;
 }
 
@@ -1104,11 +1118,15 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
-// Handle window resize for overlay positions
+// Handle window resize for overlay positions (debounced)
+let resizeTimer;
 window.addEventListener('resize', () => {
-    if (matches.length > 0) {
-        drawMatchOverlays();
-    }
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+        if (matches.length > 0) {
+            drawMatchOverlays();
+        }
+    }, 200);
 });
 
 // Initialize - MuPDF is already loaded via static import
