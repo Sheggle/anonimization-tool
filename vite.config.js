@@ -1,50 +1,6 @@
 import { defineConfig } from 'vite';
 import { viteSingleFile } from 'vite-plugin-singlefile';
 import fs from 'fs';
-import path from 'path';
-
-// Custom plugin to inline WASM as base64
-function inlineMuPdfPlugin() {
-  const wasmBase64Cache = new Map();
-
-  return {
-    name: 'inline-mupdf',
-    enforce: 'pre',
-
-    resolveId(source) {
-      // Ensure mupdf is bundled, not externalized
-      if (source === 'mupdf') {
-        return null; // Let Vite handle it normally
-      }
-    },
-
-    async load(id) {
-      // Handle mupdf-wasm.js to inline the WASM
-      if (id.includes('node_modules/mupdf/dist/mupdf-wasm.js')) {
-        const wasmPath = path.join(path.dirname(id), 'mupdf-wasm.wasm');
-
-        if (!wasmBase64Cache.has(wasmPath)) {
-          console.log('Reading WASM file:', wasmPath);
-          const wasmBuffer = fs.readFileSync(wasmPath);
-          wasmBase64Cache.set(wasmPath, wasmBuffer.toString('base64'));
-          console.log('WASM size:', wasmBuffer.length, 'bytes');
-        }
-
-        const wasmBase64 = wasmBase64Cache.get(wasmPath);
-        const originalCode = fs.readFileSync(id, 'utf-8');
-
-        // Replace URL-based WASM loading with inline base64
-        // The WASM is loaded via: new URL("mupdf-wasm.wasm",import.meta.url).href
-        const modifiedCode = originalCode.replace(
-          /new URL\("mupdf-wasm\.wasm",import\.meta\.url\)\.href/g,
-          `(()=>{const b="${wasmBase64}";const u=Uint8Array.from(atob(b),c=>c.charCodeAt(0));return URL.createObjectURL(new Blob([u],{type:'application/wasm'}));})()`
-        );
-
-        return modifiedCode;
-      }
-    }
-  };
-}
 
 // Custom plugin to inline Tesseract.js resources
 function inlineTesseractPlugin() {
@@ -81,7 +37,6 @@ function inlineTesseractPlugin() {
 export default defineConfig({
   root: 'src',
   plugins: [
-    inlineMuPdfPlugin(),
     inlineTesseractPlugin(),
     viteSingleFile({
       removeViteModuleLoader: true,
@@ -91,7 +46,7 @@ export default defineConfig({
     target: 'esnext',
   },
   optimizeDeps: {
-    include: ['mupdf', 'tesseract.js'],
+    include: ['tesseract.js'],
     esbuildOptions: {
       target: 'esnext',
     },
@@ -104,6 +59,7 @@ export default defineConfig({
     chunkSizeWarningLimit: 100000,
     minify: 'esbuild',
     rollupOptions: {
+      external: ['html2canvas'],
       output: {
         inlineDynamicImports: true,
         manualChunks: undefined,

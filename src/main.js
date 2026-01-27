@@ -1,14 +1,12 @@
 import './styles.css';
 import { PATTERNS, isPattern } from './patterns.js';
-import mupdfModule from './mupdf-loader.js';
+import * as pdfjsLib from 'pdfjs-dist';
+import pdfjsWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import { jsPDF } from 'jspdf';
 import { createOfflineWorker } from './tesseract-loader.js';
 
-// MuPDF module
-let mupdf = mupdfModule;
-let mupdfReady = true;
-
-// Tesseract for OCR (using bundled offline loader)
-let tesseractWorker = null;
+// PDF.js worker setup
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorkerUrl;
 
 // State
 let pdfDocument = null;
@@ -41,7 +39,6 @@ const pageCount = document.getElementById('pageCount');
 const termsInput = document.getElementById('termsInput');
 const scanBtn = document.getElementById('scanBtn');
 const processBtn = document.getElementById('processBtn');
-const ocrCheckbox = document.getElementById('ocrCheckbox');
 const previewPlaceholder = document.getElementById('previewPlaceholder');
 const previewScroll = document.getElementById('previewScroll');
 const matchList = document.getElementById('matchList');
@@ -123,11 +120,6 @@ async function handleFile(file) {
         return;
     }
 
-    if (!mupdfReady) {
-        showStatus('MuPDF library is still loading. Please wait...', 'loading');
-        return;
-    }
-
     // Clear OCR cache for new document
     ocrCache.clear();
 
@@ -135,9 +127,9 @@ async function handleFile(file) {
 
     try {
         pdfData = new Uint8Array(await file.arrayBuffer());
-        pdfDocument = mupdf.Document.openDocument(pdfData, "application/pdf");
+        pdfDocument = await pdfjsLib.getDocument({ data: pdfData.slice() }).promise;
 
-        const numPages = pdfDocument.countPages();
+        const numPages = pdfDocument.numPages;
 
         fileName.textContent = file.name;
         pageCount.textContent = `${numPages} page${numPages !== 1 ? 's' : ''}`;
@@ -160,38 +152,6 @@ async function handleFile(file) {
     }
 }
 
-// Convert pixmap to canvas ImageData
-function pixmapToImageData(pixmap) {
-    const w = pixmap.getWidth();
-    const h = pixmap.getHeight();
-    const pixels = pixmap.getPixels();
-    const n = pixmap.getNumberOfComponents();
-
-    // Create RGBA image data
-    const rgba = new Uint8ClampedArray(w * h * 4);
-
-    if (n === 4) {
-        // Already RGBA
-        rgba.set(pixels);
-    } else if (n === 3) {
-        // RGB -> RGBA
-        for (let i = 0, j = 0; i < pixels.length; i += 3, j += 4) {
-            rgba[j] = pixels[i];
-            rgba[j + 1] = pixels[i + 1];
-            rgba[j + 2] = pixels[i + 2];
-            rgba[j + 3] = 255;
-        }
-    } else if (n === 1) {
-        // Grayscale -> RGBA
-        for (let i = 0, j = 0; i < pixels.length; i++, j += 4) {
-            rgba[j] = rgba[j + 1] = rgba[j + 2] = pixels[i];
-            rgba[j + 3] = 255;
-        }
-    }
-
-    return new ImageData(rgba, w, h);
-}
-
 async function generatePreviews() {
     if (!pdfDocument) return;
 
@@ -200,36 +160,34 @@ async function generatePreviews() {
     previewScroll.innerHTML = '';
     pageImages = [];
 
-    const numPages = pdfDocument.countPages();
+    const numPages = pdfDocument.numPages;
 
     for (let i = 0; i < numPages; i++) {
-        const page = pdfDocument.loadPage(i);
-        const bounds = page.getBounds();
-        const width = bounds[2] - bounds[0];
-        const height = bounds[3] - bounds[1];
+        const page = await pdfDocument.getPage(i + 1); // PDF.js is 1-indexed
+        const baseViewport = page.getViewport({ scale: 1 });
+        const width = baseViewport.width;
+        const height = baseViewport.height;
 
         // Render at reasonable scale for preview
         const scale = Math.min(800 / width, 1.5);
-        const pixmap = page.toPixmap(
-            mupdf.Matrix.scale(scale, scale),
-            mupdf.ColorSpace.DeviceRGB,
-            false,
-            true
-        );
+        const viewport = page.getViewport({ scale });
 
-        const imageData = pixmapToImageData(pixmap);
-        pixmap.destroy();
-        pageImages.push({ width, height, scale, bounds });
+        const canvas = document.createElement('canvas');
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        const ctx = canvas.getContext('2d');
+        await page.render({ canvasContext: ctx, viewport }).promise;
+
+        pageImages.push({
+            width,
+            height,
+            scale,
+            bounds: [0, 0, width, height]
+        });
 
         const container = document.createElement('div');
         container.className = 'page-preview';
         container.id = `page-${i}`;
-
-        const canvas = document.createElement('canvas');
-        canvas.width = imageData.width;
-        canvas.height = imageData.height;
-        const ctx = canvas.getContext('2d');
-        ctx.putImageData(imageData, 0, 0);
 
         const label = document.createElement('div');
         label.className = 'page-label';
@@ -242,8 +200,6 @@ async function generatePreviews() {
         // Attach drawing handlers for manual redaction
         attachDrawingHandlers(container, i);
 
-        page.destroy();
-
         // Yield to let the browser paint each page progressively
         await new Promise(r => setTimeout(r, 0));
     }
@@ -253,150 +209,6 @@ async function generatePreviews() {
 termsInput.addEventListener('input', () => {
     scanBtn.disabled = !pdfDocument || !termsInput.value.trim();
 });
-
-// Extract text blocks with bounding boxes from structured text
-function extractTextBlocks(structuredText) {
-    const blocks = [];
-
-    try {
-        const textJson = JSON.parse(structuredText.asJSON());
-
-        for (const block of textJson.blocks || []) {
-            for (const line of block.lines || []) {
-                // In newer mupdf, text is directly on line.text
-                const lineText = line.text || '';
-
-                // bbox can be an object {x, y, w, h} or array [x0, y0, x1, y1]
-                let bbox = line.bbox;
-                if (bbox && typeof bbox === 'object' && 'x' in bbox) {
-                    // Convert {x, y, w, h} to [x0, y0, x1, y1]
-                    bbox = [bbox.x, bbox.y, bbox.x + bbox.w, bbox.y + bbox.h];
-                }
-
-                if (lineText && bbox) {
-                    blocks.push({
-                        text: lineText,
-                        bbox: bbox,
-                        type: 'line'
-                    });
-                }
-            }
-        }
-    } catch (err) {
-        console.error('Error parsing structured text:', err);
-    }
-
-    return blocks;
-}
-
-// Find matches using regex on extracted text, get precise bbox from MuPDF
-function findMatchesOnPage(page, term, pageNum) {
-    const results = [];
-    const structuredText = page.toStructuredText("preserve-whitespace");
-    const blocks = extractTextBlocks(structuredText);
-
-    // Determine regex and validator
-    let regex, validate;
-    if (isPattern(term)) {
-        const pattern = PATTERNS[term];
-        regex = new RegExp(pattern.regex.source, pattern.regex.flags);
-        validate = pattern.validate;
-    } else {
-        // Treat term as regex (case-insensitive)
-        try {
-            regex = new RegExp(term, 'gi');
-        } catch (e) {
-            // Invalid regex - escape and use as literal
-            regex = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
-        }
-        validate = () => true;
-    }
-
-    // Collect all regex matches with estimated positions
-    const regexMatches = [];
-    for (const block of blocks) {
-        let match;
-        regex.lastIndex = 0;
-        while ((match = regex.exec(block.text)) !== null) {
-            const matchedText = match[0];
-            if (!validate(matchedText)) continue;
-
-            // Estimate position for correlation
-            const estBbox = estimateBbox(block, match.index, matchedText.length);
-            regexMatches.push({
-                text: matchedText,
-                term,
-                estBbox,
-                blockBbox: block.bbox,
-                pageNum
-            });
-        }
-    }
-
-    // Get all MuPDF quads for each unique matched text
-    const textToQuads = new Map();
-    for (const m of regexMatches) {
-        if (!textToQuads.has(m.text)) {
-            const quads = page.search(m.text);
-            const bboxes = [];
-            if (quads) {
-                for (const quadWrapper of quads) {
-                    const quad = quadWrapper[0];
-                    if (quad) {
-                        bboxes.push(quadToBbox(quad));
-                    }
-                }
-            }
-            textToQuads.set(m.text, bboxes);
-        }
-    }
-
-    // Match each regex result with the closest MuPDF bbox
-    const usedBboxes = new Set();
-    for (const m of regexMatches) {
-        const bboxes = textToQuads.get(m.text) || [];
-
-        // Find bbox that overlaps with the block's y-range and is closest to estimated x
-        let bestBbox = null;
-        let bestDist = Infinity;
-
-        for (const bbox of bboxes) {
-            const key = bbox.join(',');
-            if (usedBboxes.has(key)) continue;
-
-            // Check y overlap (same line)
-            const yOverlap = bbox[1] < m.blockBbox[3] && bbox[3] > m.blockBbox[1];
-            if (!yOverlap) continue;
-
-            // Distance from estimated x position
-            const dist = Math.abs(bbox[0] - m.estBbox[0]);
-            if (dist < bestDist) {
-                bestDist = dist;
-                bestBbox = bbox;
-            }
-        }
-
-        if (bestBbox) {
-            usedBboxes.add(bestBbox.join(','));
-            results.push({
-                text: m.text,
-                term: m.term,
-                bbox: bestBbox,
-                pageNum
-            });
-        } else {
-            // Fallback to estimated bbox if no MuPDF match
-            results.push({
-                text: m.text,
-                term: m.term,
-                bbox: m.estBbox,
-                pageNum
-            });
-        }
-    }
-
-    return results;
-}
 
 // Estimate bounding box for a substring within a text block
 function estimateBbox(block, charIndex, charLength) {
@@ -412,46 +224,6 @@ function estimateBbox(block, charIndex, charLength) {
     const x1 = bbox[0] + (charIndex + charLength) * charWidth;
 
     return [x0, bbox[1], x1, bbox[3]];
-}
-
-// Convert MuPDF quad to bbox [x0, y0, x1, y1]
-function quadToBbox(quad) {
-    // Quad is [x0,y0, x1,y1, x2,y2, x3,y3] (4 corners)
-    // We need the bounding rectangle
-    const xs = [quad[0], quad[2], quad[4], quad[6]];
-    const ys = [quad[1], quad[3], quad[5], quad[7]];
-    return [
-        Math.min(...xs),
-        Math.min(...ys),
-        Math.max(...xs),
-        Math.max(...ys)
-    ];
-}
-
-// Initialize Tesseract for OCR (using bundled offline resources)
-async function initTesseract() {
-    if (tesseractWorker) return;
-
-    showStatus('Loading OCR engine (Tesseract.js)...', 'loading');
-
-    try {
-        // Create worker with bundled Dutch + English language data
-        tesseractWorker = await createOfflineWorker({
-            logger: (m) => {
-                if (m.status === 'recognizing text') {
-                    showProgress(m.progress * 100, `OCR: ${Math.round(m.progress * 100)}%`);
-                } else if (m.status) {
-                    showStatus(`OCR: ${m.status}...`, 'loading');
-                }
-            }
-        });
-
-        showStatus('OCR engine ready', 'success');
-    } catch (err) {
-        console.error('Failed to load Tesseract:', err);
-        showStatus(`Failed to load OCR: ${err.message}`, 'error');
-        throw err;
-    }
 }
 
 // Initialize worker pool for parallel OCR
@@ -475,68 +247,6 @@ async function initWorkerPool() {
     }
 }
 
-// Perform OCR on a page (with caching)
-async function ocrPage(pageNum) {
-    // Check cache first
-    if (ocrCache.has(pageNum)) {
-        return ocrCache.get(pageNum);
-    }
-
-    if (!tesseractWorker) {
-        await initTesseract();
-    }
-
-    const page = pdfDocument.loadPage(pageNum);
-    const bounds = page.getBounds();
-
-    // Render at high resolution for OCR
-    const scale = Math.max(300 / 72, 2); // At least 300 DPI
-    const pixmap = page.toPixmap(
-        mupdf.Matrix.scale(scale, scale),
-        mupdf.ColorSpace.DeviceRGB,
-        false,
-        true
-    );
-
-    const imageData = pixmapToImageData(pixmap);
-    pixmap.destroy();
-
-    // Create canvas for Tesseract
-    const canvas = document.createElement('canvas');
-    canvas.width = imageData.width;
-    canvas.height = imageData.height;
-    const ctx = canvas.getContext('2d');
-    ctx.putImageData(imageData, 0, 0);
-
-    page.destroy();
-
-    // Run OCR
-    const result = await tesseractWorker.recognize(canvas);
-
-    // Convert Tesseract results to our block format
-    const blocks = [];
-    for (const word of result.data.words) {
-        // Convert pixel coordinates back to PDF coordinates
-        const bbox = [
-            word.bbox.x0 / scale,
-            word.bbox.y0 / scale,
-            word.bbox.x1 / scale,
-            word.bbox.y1 / scale
-        ];
-
-        blocks.push({
-            text: word.text,
-            bbox,
-            type: 'ocr',
-            confidence: word.confidence
-        });
-    }
-
-    // Cache result before returning
-    ocrCache.set(pageNum, blocks);
-    return blocks;
-}
-
 // Perform OCR on a page using a specific worker (for parallel processing)
 async function ocrPageWithWorker(pageNum, worker) {
     // Check cache first
@@ -544,48 +254,34 @@ async function ocrPageWithWorker(pageNum, worker) {
         return { pageNum, blocks: ocrCache.get(pageNum) };
     }
 
-    const page = pdfDocument.loadPage(pageNum);
+    const page = await pdfDocument.getPage(pageNum + 1); // PDF.js is 1-indexed
 
     // Render at high resolution for OCR
     const scale = Math.max(300 / 72, 2); // At least 300 DPI
-    const pixmap = page.toPixmap(
-        mupdf.Matrix.scale(scale, scale),
-        mupdf.ColorSpace.DeviceRGB,
-        false,
-        true
-    );
+    const viewport = page.getViewport({ scale });
 
-    const imageData = pixmapToImageData(pixmap);
-    pixmap.destroy();
-
-    // Create canvas for Tesseract
     const canvas = document.createElement('canvas');
-    canvas.width = imageData.width;
-    canvas.height = imageData.height;
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
     const ctx = canvas.getContext('2d');
-    ctx.putImageData(imageData, 0, 0);
-
-    page.destroy();
+    await page.render({ canvasContext: ctx, viewport }).promise;
 
     // Run OCR with specific worker
     const result = await worker.recognize(canvas);
 
-    // Convert Tesseract results to our block format
+    // Return LINE-level blocks (not words) so multi-word terms match
     const blocks = [];
-    for (const word of result.data.words) {
-        // Convert pixel coordinates back to PDF coordinates
-        const bbox = [
-            word.bbox.x0 / scale,
-            word.bbox.y0 / scale,
-            word.bbox.x1 / scale,
-            word.bbox.y1 / scale
-        ];
-
+    for (const line of result.data.lines) {
         blocks.push({
-            text: word.text,
-            bbox,
+            text: line.text,
+            bbox: [
+                line.bbox.x0 / scale,
+                line.bbox.y0 / scale,
+                line.bbox.x1 / scale,
+                line.bbox.y1 / scale
+            ],
             type: 'ocr',
-            confidence: word.confidence
+            confidence: line.confidence
         });
     }
 
@@ -634,57 +330,34 @@ scanBtn.addEventListener('click', async () => {
         .map(t => t.trim())
         .filter(t => t);
 
-    const numPages = pdfDocument.countPages();
-    const useOCR = ocrCheckbox.checked;
+    const numPages = pdfDocument.numPages;
 
-    // PHASE 1: Identify pages needing OCR
-    const pagesToOcr = [];
-    if (useOCR) {
-        showStatus('Checking pages for text content...');
-        for (let pageNum = 0; pageNum < numPages; pageNum++) {
-            // Skip if already cached
-            if (ocrCache.has(pageNum)) {
-                pagesToOcr.push(pageNum); // Still include for searching
-                continue;
-            }
-            const page = pdfDocument.loadPage(pageNum);
-            const structuredText = page.toStructuredText("preserve-whitespace");
-            const blocks = extractTextBlocks(structuredText);
-            const hasText = blocks.some(b => b.text.trim().length > 10);
-            if (!hasText) {
-                pagesToOcr.push(pageNum);
-            }
-            page.destroy();
-        }
+    // PHASE 1: OCR all pages (with caching)
+    const allPages = [];
+    for (let i = 0; i < numPages; i++) {
+        allPages.push(i);
     }
 
-    // PHASE 2: Parallel OCR (with caching)
-    if (pagesToOcr.length > 0) {
-        // Filter to only pages not in cache
-        const uncachedPages = pagesToOcr.filter(p => !ocrCache.has(p));
+    const uncachedPages = allPages.filter(p => !ocrCache.has(p));
 
-        if (uncachedPages.length > 0) {
-            try {
-                await initWorkerPool();
-            } catch (err) {
-                return; // Error already shown
-            }
-
-            showStatus(`Running OCR on ${uncachedPages.length} scanned pages...`);
-
-            await ocrPagesParallel(uncachedPages, (done, total) => {
-                showProgress((done / total) * 50, `OCR: ${done}/${total} pages`);
-            });
+    if (uncachedPages.length > 0) {
+        try {
+            await initWorkerPool();
+        } catch (err) {
+            return; // Error already shown
         }
+
+        showStatus(`Running OCR on ${uncachedPages.length} pages...`);
+
+        await ocrPagesParallel(uncachedPages, (done, total) => {
+            showProgress((done / total) * 50, `OCR: ${done}/${total} pages`);
+        });
     }
 
-    // PHASE 3: Search for matches (uses cached OCR results)
+    // PHASE 2: Search OCR results for matches
     for (let pageNum = 0; pageNum < numPages; pageNum++) {
         showProgress(50 + (pageNum / numPages) * 50, `Searching page ${pageNum + 1} of ${numPages}...`);
 
-        const page = pdfDocument.loadPage(pageNum);
-
-        // If OCR was done for this page, search OCR results
         if (ocrCache.has(pageNum)) {
             const ocrBlocks = ocrCache.get(pageNum);
             for (const term of terms) {
@@ -719,14 +392,6 @@ scanBtn.addEventListener('click', async () => {
                 }
             }
         }
-
-        // Search for matches using MuPDF's precise search (for text-based pages or hybrid)
-        for (const term of terms) {
-            const termMatches = findMatchesOnPage(page, term, pageNum);
-            matches.push(...termMatches);
-        }
-
-        page.destroy();
 
         // Allow UI to update
         await new Promise(r => setTimeout(r, 0));
@@ -990,9 +655,9 @@ processBtn.addEventListener('click', async () => {
     scanBtn.disabled = true;
 
     try {
-        // Reload document fresh for modifications
-        const doc = mupdf.Document.openDocument(pdfData, "application/pdf");
-        const numPages = doc.countPages();
+        // Reload document fresh for rendering
+        const pdf = await pdfjsLib.getDocument({ data: pdfData.slice() }).promise;
+        const numPages = pdf.numPages;
 
         // Group matches by page
         const matchesByPage = {};
@@ -1001,86 +666,58 @@ processBtn.addEventListener('click', async () => {
             matchesByPage[match.pageNum].push(match);
         }
 
-        // Create output buffer and writer
-        const buffer = new mupdf.Buffer();
-        const writer = new mupdf.DocumentWriter(buffer, "pdf", "");
+        // Get first page dimensions to initialize jsPDF
+        const firstPage = await pdf.getPage(1);
+        const fp = firstPage.getViewport({ scale: 1 });
+        const doc = new jsPDF({ unit: 'pt', format: [fp.width, fp.height] });
 
-        // Process each page with hybrid approach:
-        // 1. Apply redactions to remove text layer
-        // 2. Render the page (now with text removed)
-        // 3. Draw black rectangles on top (for visual redaction of images)
         for (let pageNum = 0; pageNum < numPages; pageNum++) {
             showProgress((pageNum / numPages) * 100, `Redacting page ${pageNum + 1} of ${numPages}...`);
 
-            const page = doc.loadPage(pageNum);
-            const bounds = page.getBounds();
-            const pageMatches = matchesByPage[pageNum] || [];
-
-            // Always rasterize every page. page.run() silently drops JBIG2
-            // image content without throwing, producing blank pages.
-            // toPixmap() handles JBIG2 fine, so we rasterize unconditionally.
-            {
-                const width = bounds[2] - bounds[0];
-                const height = bounds[3] - bounds[1];
-                const scale = Math.min(3, 4000 / Math.max(width, height));
-                const pixmap = page.toPixmap(
-                    mupdf.Matrix.scale(scale, scale),
-                    mupdf.ColorSpace.DeviceRGB,
-                    false,
-                    true
-                );
-
-                if (pageMatches.length > 0) {
-                    const pixels = pixmap.getPixels();
-                    const stride = pixmap.getStride();
-                    const n = pixmap.getNumberOfComponents();
-
-                    for (const match of pageMatches) {
-                        const x0 = Math.floor((match.bbox[0] - bounds[0]) * scale);
-                        const y0 = Math.floor((match.bbox[1] - bounds[1]) * scale);
-                        const x1 = Math.ceil((match.bbox[2] - bounds[0]) * scale);
-                        const y1 = Math.ceil((match.bbox[3] - bounds[1]) * scale);
-                        for (let y = Math.max(0, y0); y < Math.min(pixmap.getHeight(), y1); y++) {
-                            for (let x = Math.max(0, x0); x < Math.min(pixmap.getWidth(), x1); x++) {
-                                const idx = y * stride + x * n;
-                                for (let c = 0; c < n; c++) pixels[idx + c] = 0;
-                            }
-                        }
-                    }
-                }
-
-                const jpegData = pixmap.asJPEG(90);
-                pixmap.destroy();
-                const image = new mupdf.Image(jpegData);
-                const device = writer.beginPage(bounds);
-                const imgMatrix = [
-                    bounds[2] - bounds[0], 0,
-                    0, bounds[3] - bounds[1],
-                    bounds[0], bounds[1]
-                ];
-                device.fillImage(image, imgMatrix, 1);
-                writer.endPage();
-                image.destroy();
+            if (pageNum > 0) {
+                const pg = await pdf.getPage(pageNum + 1);
+                const pv = pg.getViewport({ scale: 1 });
+                doc.addPage([pv.width, pv.height]);
             }
-            page.destroy();
 
+            const page = await pdf.getPage(pageNum + 1);
+            const baseVp = page.getViewport({ scale: 1 });
+            const scale = Math.min(3, 4000 / Math.max(baseVp.width, baseVp.height));
+            const viewport = page.getViewport({ scale });
+
+            // 1. Render to canvas
+            const canvas = document.createElement('canvas');
+            canvas.width = viewport.width;
+            canvas.height = viewport.height;
+            const ctx = canvas.getContext('2d');
+            await page.render({ canvasContext: ctx, viewport }).promise;
+
+            // 2. Draw black rectangles for matches
+            const pageMatches = matchesByPage[pageNum] || [];
+            if (pageMatches.length > 0) {
+                ctx.fillStyle = 'black';
+                for (const match of pageMatches) {
+                    ctx.fillRect(
+                        match.bbox[0] * scale,
+                        match.bbox[1] * scale,
+                        (match.bbox[2] - match.bbox[0]) * scale,
+                        (match.bbox[3] - match.bbox[1]) * scale
+                    );
+                }
+            }
+
+            // 3. Add to PDF as JPEG
+            const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.92);
+            doc.addImage(jpegDataUrl, 'JPEG', 0, 0, baseVp.width, baseVp.height);
+
+            // Allow UI to update
             await new Promise(r => setTimeout(r, 0));
         }
 
-        writer.close();
         showProgress(90, 'Saving PDF...');
 
-        // Get the output data
-        const outputData = buffer.asUint8Array();
-
-        // Download
-        const blob = new Blob([outputData], { type: 'application/pdf' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = fileName.textContent.replace('.pdf', '_anonymized.pdf');
-        a.click();
-        URL.revokeObjectURL(url);
+        // 4. Download
+        doc.save(fileName.textContent.replace('.pdf', '_anonymized.pdf'));
 
         hideProgress();
         showStatus('PDF anonymized and downloaded successfully!', 'success');
@@ -1112,6 +749,6 @@ window.addEventListener('resize', () => {
     }, 200);
 });
 
-// Initialize - MuPDF is already loaded via static import
-console.log('PDF Anonymizer loaded. MuPDF ready.');
+// Initialize
+console.log('PDF Anonymizer loaded. PDF.js ready.');
 hideStatus();
