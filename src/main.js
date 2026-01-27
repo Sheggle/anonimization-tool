@@ -218,6 +218,7 @@ async function generatePreviews() {
         );
 
         const imageData = pixmapToImageData(pixmap);
+        pixmap.destroy();
         pageImages.push({ width, height, scale, bounds });
 
         const container = document.createElement('div');
@@ -240,6 +241,8 @@ async function generatePreviews() {
 
         // Attach drawing handlers for manual redaction
         attachDrawingHandlers(container, i);
+
+        page.destroy();
 
         // Yield to let the browser paint each page progressively
         await new Promise(r => setTimeout(r, 0));
@@ -496,6 +499,7 @@ async function ocrPage(pageNum) {
     );
 
     const imageData = pixmapToImageData(pixmap);
+    pixmap.destroy();
 
     // Create canvas for Tesseract
     const canvas = document.createElement('canvas');
@@ -503,6 +507,8 @@ async function ocrPage(pageNum) {
     canvas.height = imageData.height;
     const ctx = canvas.getContext('2d');
     ctx.putImageData(imageData, 0, 0);
+
+    page.destroy();
 
     // Run OCR
     const result = await tesseractWorker.recognize(canvas);
@@ -550,6 +556,7 @@ async function ocrPageWithWorker(pageNum, worker) {
     );
 
     const imageData = pixmapToImageData(pixmap);
+    pixmap.destroy();
 
     // Create canvas for Tesseract
     const canvas = document.createElement('canvas');
@@ -557,6 +564,8 @@ async function ocrPageWithWorker(pageNum, worker) {
     canvas.height = imageData.height;
     const ctx = canvas.getContext('2d');
     ctx.putImageData(imageData, 0, 0);
+
+    page.destroy();
 
     // Run OCR with specific worker
     const result = await worker.recognize(canvas);
@@ -645,6 +654,7 @@ scanBtn.addEventListener('click', async () => {
             if (!hasText) {
                 pagesToOcr.push(pageNum);
             }
+            page.destroy();
         }
     }
 
@@ -715,6 +725,8 @@ scanBtn.addEventListener('click', async () => {
             const termMatches = findMatchesOnPage(page, term, pageNum);
             matches.push(...termMatches);
         }
+
+        page.destroy();
 
         // Allow UI to update
         await new Promise(r => setTimeout(r, 0));
