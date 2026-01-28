@@ -232,12 +232,12 @@ function findMatchBbox(block, matchText, charIndex) {
         return estimateBbox(block, charIndex, matchText.length);
     }
 
-    // Build character position → word mapping
+    // Build character position → word mapping (with position within word)
     let charPos = 0;
     const charToWord = [];
     for (const word of block.words) {
         for (let i = 0; i < word.text.length; i++) {
-            charToWord.push(word);
+            charToWord.push({ word, posInWord: i });
         }
         charPos += word.text.length;
         // Account for space between words
@@ -247,27 +247,50 @@ function findMatchBbox(block, matchText, charIndex) {
         }
     }
 
-    // Find words that overlap with the match
     const startIdx = charIndex;
     const endIdx = charIndex + matchText.length - 1;
 
-    const matchedWords = new Set();
+    // Collect matched words with their character ranges
+    const wordRanges = new Map(); // word -> { startPos, endPos }
     for (let i = startIdx; i <= endIdx && i < charToWord.length; i++) {
-        if (charToWord[i]) matchedWords.add(charToWord[i]);
+        const entry = charToWord[i];
+        if (entry) {
+            if (!wordRanges.has(entry.word)) {
+                wordRanges.set(entry.word, { startPos: entry.posInWord, endPos: entry.posInWord });
+            } else {
+                wordRanges.get(entry.word).endPos = entry.posInWord;
+            }
+        }
     }
 
-    if (matchedWords.size === 0) {
+    if (wordRanges.size === 0) {
         return estimateBbox(block, charIndex, matchText.length);
     }
 
-    // Combine bboxes of matched words
-    const words = Array.from(matchedWords);
-    return [
-        Math.min(...words.map(w => w.bbox[0])),
-        Math.min(...words.map(w => w.bbox[1])),
-        Math.max(...words.map(w => w.bbox[2])),
-        Math.max(...words.map(w => w.bbox[3]))
-    ];
+    // Calculate bbox: for partial matches, interpolate within the word
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+    for (const [word, range] of wordRanges) {
+        const wordLen = word.text.length;
+        const wordWidth = word.bbox[2] - word.bbox[0];
+        const charWidth = wordWidth / wordLen;
+
+        // If full word matched, use full bbox
+        if (range.startPos === 0 && range.endPos === wordLen - 1) {
+            minX = Math.min(minX, word.bbox[0]);
+            maxX = Math.max(maxX, word.bbox[2]);
+        } else {
+            // Partial match: interpolate within word
+            const x0 = word.bbox[0] + range.startPos * charWidth;
+            const x1 = word.bbox[0] + (range.endPos + 1) * charWidth;
+            minX = Math.min(minX, x0);
+            maxX = Math.max(maxX, x1);
+        }
+        minY = Math.min(minY, word.bbox[1]);
+        maxY = Math.max(maxY, word.bbox[3]);
+    }
+
+    return [minX, minY, maxX, maxY];
 }
 
 // Initialize worker pool for parallel OCR
