@@ -210,7 +210,7 @@ termsInput.addEventListener('input', () => {
     scanBtn.disabled = !pdfDocument || !termsInput.value.trim();
 });
 
-// Estimate bounding box for a substring within a text block
+// Estimate bounding box for a substring within a text block (fallback)
 function estimateBbox(block, charIndex, charLength) {
     const text = block.text;
     const bbox = block.bbox; // [x0, y0, x1, y1]
@@ -224,6 +224,50 @@ function estimateBbox(block, charIndex, charLength) {
     const x1 = bbox[0] + (charIndex + charLength) * charWidth;
 
     return [x0, bbox[1], x1, bbox[3]];
+}
+
+// Find precise bounding box using word-level OCR data
+function findMatchBbox(block, matchText, charIndex) {
+    if (!block.words || block.words.length === 0) {
+        return estimateBbox(block, charIndex, matchText.length);
+    }
+
+    // Build character position → word mapping
+    let charPos = 0;
+    const charToWord = [];
+    for (const word of block.words) {
+        for (let i = 0; i < word.text.length; i++) {
+            charToWord.push(word);
+        }
+        charPos += word.text.length;
+        // Account for space between words
+        if (charPos < block.text.length && block.text[charPos] === ' ') {
+            charToWord.push(null); // space
+            charPos++;
+        }
+    }
+
+    // Find words that overlap with the match
+    const startIdx = charIndex;
+    const endIdx = charIndex + matchText.length - 1;
+
+    const matchedWords = new Set();
+    for (let i = startIdx; i <= endIdx && i < charToWord.length; i++) {
+        if (charToWord[i]) matchedWords.add(charToWord[i]);
+    }
+
+    if (matchedWords.size === 0) {
+        return estimateBbox(block, charIndex, matchText.length);
+    }
+
+    // Combine bboxes of matched words
+    const words = Array.from(matchedWords);
+    return [
+        Math.min(...words.map(w => w.bbox[0])),
+        Math.min(...words.map(w => w.bbox[1])),
+        Math.max(...words.map(w => w.bbox[2])),
+        Math.max(...words.map(w => w.bbox[3]))
+    ];
 }
 
 // Initialize worker pool for parallel OCR
@@ -269,9 +313,19 @@ async function ocrPageWithWorker(pageNum, worker) {
     // Run OCR with specific worker
     const result = await worker.recognize(canvas);
 
-    // Return LINE-level blocks (not words) so multi-word terms match
+    // Return LINE-level blocks with embedded WORD bboxes for precise matching
     const blocks = [];
     for (const line of result.data.lines) {
+        const words = line.words.map(word => ({
+            text: word.text,
+            bbox: [
+                word.bbox.x0 / scale,
+                word.bbox.y0 / scale,
+                word.bbox.x1 / scale,
+                word.bbox.y1 / scale
+            ]
+        }));
+
         blocks.push({
             text: line.text,
             bbox: [
@@ -281,7 +335,8 @@ async function ocrPageWithWorker(pageNum, worker) {
                 line.bbox.y1 / scale
             ],
             type: 'ocr',
-            confidence: line.confidence
+            confidence: line.confidence,
+            words  // word-level data for precise bbox lookup
         });
     }
 
@@ -380,8 +435,8 @@ scanBtn.addEventListener('click', async () => {
                     let match;
                     while ((match = regex.exec(block.text)) !== null) {
                         if (!validate(match[0])) continue;
-                        // Estimate bbox for the match within the OCR block
-                        const estBbox = estimateBbox(block, match.index, match[0].length);
+                        // Get precise bbox using word-level OCR data
+                        const estBbox = findMatchBbox(block, match[0], match.index);
                         matches.push({
                             text: match[0],
                             term,
