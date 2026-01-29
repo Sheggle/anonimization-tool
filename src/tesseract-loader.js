@@ -15,6 +15,7 @@ import coreScript from 'tesseract.js-core/tesseract-core-simd-lstm.wasm.js?raw';
 // Import language data as base64 (gzipped .traineddata.gz files)
 import nldDataBase64 from './lang-data/nld.js';
 import engDataBase64 from './lang-data/eng.js';
+import osdDataBase64 from './lang-data/osd.js';
 
 // Convert base64 to Uint8Array
 function base64ToUint8Array(base64) {
@@ -29,7 +30,8 @@ function base64ToUint8Array(base64) {
 // Cached language data
 const languageData = {
   nld: null,
-  eng: null
+  eng: null,
+  osd: null
 };
 
 /**
@@ -119,8 +121,8 @@ async function loadImage(image) {
 
 function getLanguageData(lang) {
   if (!languageData[lang]) {
-    const base64 = lang === 'nld' ? nldDataBase64 : engDataBase64;
-    languageData[lang] = base64ToUint8Array(base64);
+    const base64Map = { nld: nldDataBase64, eng: engDataBase64, osd: osdDataBase64 };
+    languageData[lang] = base64ToUint8Array(base64Map[lang]);
   }
   return languageData[lang];
 }
@@ -290,4 +292,135 @@ export async function createOfflineWorker(options = {}) {
   };
 }
 
-export default { createOfflineWorker };
+/**
+ * Create a Tesseract worker specifically for Orientation and Script Detection (OSD)
+ *
+ * @param {Object} options - Additional options
+ * @param {Function} options.logger - Logger function for progress updates
+ * @returns {Promise<Object>} OSD worker instance
+ */
+export async function createOsdWorker(options = {}) {
+  const { logger = () => {} } = options;
+
+  // Create worker directly from combined script
+  const worker = createInlineWorker();
+
+  // Worker communication helpers
+  let jobCounter = 0;
+  const resolvers = {};
+  const rejecters = {};
+
+  worker.onmessage = (e) => {
+    const { jobId, status, action, data } = e.data;
+    const promiseId = `${action}-${jobId}`;
+
+    if (status === 'resolve') {
+      if (resolvers[promiseId]) {
+        resolvers[promiseId](data);
+        delete resolvers[promiseId];
+        delete rejecters[promiseId];
+      }
+    } else if (status === 'reject') {
+      if (rejecters[promiseId]) {
+        rejecters[promiseId](new Error(data));
+        delete resolvers[promiseId];
+        delete rejecters[promiseId];
+      }
+    } else if (status === 'progress') {
+      logger(data);
+    }
+  };
+
+  worker.onerror = (e) => {
+    console.error('OSD Worker error:', e);
+  };
+
+  const sendMessage = (action, payload) => {
+    return new Promise((resolve, reject) => {
+      const jobId = `Job-${++jobCounter}`;
+      const promiseId = `${action}-${jobId}`;
+      resolvers[promiseId] = resolve;
+      rejecters[promiseId] = reject;
+
+      worker.postMessage({
+        workerId: 'OSD-Worker-1',
+        jobId,
+        action,
+        payload
+      });
+    });
+  };
+
+  // Initialize: load the WASM core
+  logger({ status: 'loading tesseract core for OSD', progress: 0 });
+  await sendMessage('load', {
+    options: {
+      lstmOnly: false, // OSD requires legacy mode
+      corePath: 'embedded',
+      logging: false
+    }
+  });
+
+  // Load OSD language data
+  logger({ status: 'loading OSD traineddata', progress: 0 });
+
+  const langs = [{ code: 'osd', data: getLanguageData('osd') }];
+
+  await sendMessage('loadLanguage', {
+    langs: langs,
+    options: {
+      gzip: true,
+      lstmOnly: false,
+      cacheMethod: 'none'
+    }
+  });
+
+  // Initialize the API with OSD
+  logger({ status: 'initializing OSD api', progress: 0 });
+  await sendMessage('initialize', {
+    langs: 'osd',
+    oem: 0, // OEM_TESSERACT_ONLY (required for OSD)
+    config: {}
+  });
+
+  logger({ status: 'OSD ready', progress: 1 });
+
+  // Return worker interface
+  return {
+    /**
+     * Detect orientation of an image
+     * @param {HTMLCanvasElement|ImageData|Uint8Array} image - Image to analyze
+     * @returns {Promise<{orientation: number, rotate: number, orientationConfidence: number}>}
+     *   orientation: 0-3 (page orientation in multiples of 90 degrees)
+     *   rotate: degrees to rotate clockwise to correct (0, 90, 180, 270)
+     *   orientationConfidence: confidence score
+     */
+    detect: async (image) => {
+      const imageData = await loadImage(image);
+
+      const result = await sendMessage('recognize', {
+        image: imageData,
+        options: {},
+        output: { blocks: false, text: false, hocr: false, tsv: false }
+      });
+
+      // Tesseract returns orientation as 0-3 (multiples of 90 degrees counter-clockwise)
+      // We convert to clockwise rotation needed to correct
+      const orientation = result.orientation || 0;
+      const rotateMap = { 0: 0, 1: 270, 2: 180, 3: 90 };
+
+      return {
+        orientation,
+        rotate: rotateMap[orientation] || 0,
+        orientationConfidence: result.orientation_confidence || 0
+      };
+    },
+
+    terminate: async () => {
+      await sendMessage('terminate', {});
+      worker.terminate();
+    }
+  };
+}
+
+export default { createOfflineWorker, createOsdWorker };

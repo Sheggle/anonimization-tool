@@ -3,7 +3,7 @@ import { PATTERNS, isPattern } from './patterns.js';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfjsWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { jsPDF } from 'jspdf';
-import { createOfflineWorker } from './tesseract-loader.js';
+import { createOfflineWorker, createOsdWorker } from './tesseract-loader.js';
 
 // PDF.js worker setup
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorkerUrl;
@@ -29,6 +29,14 @@ const ocrCache = new Map();
 const WORKER_POOL_SIZE = Math.min(navigator.hardwareConcurrency || 4, 4);
 let workerPool = [];
 let workerPoolReady = false;
+
+// OSD worker for orientation detection
+let osdWorker = null;
+let osdWorkerReady = false;
+
+// Page rotation cache: Map<pageNum, rotationDegrees>
+// Stores the rotation needed to correct each page (0, 90, 180, 270)
+const pageRotations = new Map();
 
 // DOM Elements
 const fileInput = document.getElementById('fileInput');
@@ -120,8 +128,9 @@ async function handleFile(file) {
         return;
     }
 
-    // Clear OCR cache for new document
+    // Clear caches for new document
     ocrCache.clear();
+    pageRotations.clear();
 
     showStatus('Loading PDF...');
 
@@ -160,29 +169,44 @@ async function generatePreviews() {
     previewScroll.innerHTML = '';
     pageImages = [];
 
+    // Initialize OSD worker for orientation detection
+    await initOsdWorker();
+
     const numPages = pdfDocument.numPages;
 
     for (let i = 0; i < numPages; i++) {
         const page = await pdfDocument.getPage(i + 1); // PDF.js is 1-indexed
         const baseViewport = page.getViewport({ scale: 1 });
-        const width = baseViewport.width;
-        const height = baseViewport.height;
+        const origWidth = baseViewport.width;
+        const origHeight = baseViewport.height;
 
         // Render at reasonable scale for preview
-        const scale = Math.min(800 / width, 1.5);
+        const scale = Math.min(800 / origWidth, 1.5);
         const viewport = page.getViewport({ scale });
 
-        const canvas = document.createElement('canvas');
+        let canvas = document.createElement('canvas');
         canvas.width = viewport.width;
         canvas.height = viewport.height;
         const ctx = canvas.getContext('2d');
         await page.render({ canvasContext: ctx, viewport }).promise;
 
+        // Detect and apply orientation correction
+        const rotation = await detectPageOrientation(i);
+        if (rotation !== 0) {
+            canvas = rotateCanvas(canvas, rotation);
+        }
+
+        // Store corrected dimensions (swap for 90/270 rotation)
+        const isSwapped = rotation === 90 || rotation === 270;
+        const width = isSwapped ? origHeight : origWidth;
+        const height = isSwapped ? origWidth : origHeight;
+
         pageImages.push({
             width,
             height,
             scale,
-            bounds: [0, 0, width, height]
+            bounds: [0, 0, width, height],
+            rotation
         });
 
         const container = document.createElement('div');
@@ -314,6 +338,91 @@ async function initWorkerPool() {
     }
 }
 
+// Initialize OSD worker for orientation detection
+async function initOsdWorker() {
+    if (osdWorkerReady) return;
+
+    try {
+        osdWorker = await createOsdWorker({ logger: () => {} });
+        osdWorkerReady = true;
+    } catch (err) {
+        console.error('Failed to initialize OSD worker:', err);
+        // Non-fatal: orientation detection is optional
+        osdWorker = null;
+    }
+}
+
+// Rotate a canvas by the given degrees (90, 180, 270)
+function rotateCanvas(canvas, degrees) {
+    if (degrees === 0) return canvas;
+
+    const ctx = canvas.getContext('2d');
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+    const rotatedCanvas = document.createElement('canvas');
+    const rotatedCtx = rotatedCanvas.getContext('2d');
+
+    if (degrees === 180) {
+        rotatedCanvas.width = canvas.width;
+        rotatedCanvas.height = canvas.height;
+        rotatedCtx.translate(canvas.width, canvas.height);
+        rotatedCtx.rotate(Math.PI);
+    } else if (degrees === 90) {
+        rotatedCanvas.width = canvas.height;
+        rotatedCanvas.height = canvas.width;
+        rotatedCtx.translate(canvas.height, 0);
+        rotatedCtx.rotate(Math.PI / 2);
+    } else if (degrees === 270) {
+        rotatedCanvas.width = canvas.height;
+        rotatedCanvas.height = canvas.width;
+        rotatedCtx.translate(0, canvas.width);
+        rotatedCtx.rotate(-Math.PI / 2);
+    }
+
+    // Draw original image onto rotated canvas
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = canvas.width;
+    tempCanvas.height = canvas.height;
+    tempCanvas.getContext('2d').putImageData(imageData, 0, 0);
+    rotatedCtx.drawImage(tempCanvas, 0, 0);
+
+    return rotatedCanvas;
+}
+
+// Detect orientation for a page and cache the result
+async function detectPageOrientation(pageNum) {
+    if (pageRotations.has(pageNum)) {
+        return pageRotations.get(pageNum);
+    }
+
+    if (!osdWorker) {
+        pageRotations.set(pageNum, 0);
+        return 0;
+    }
+
+    try {
+        const page = await pdfDocument.getPage(pageNum + 1);
+        const scale = Math.max(150 / 72, 1); // Lower res for faster OSD
+        const viewport = page.getViewport({ scale });
+
+        const canvas = document.createElement('canvas');
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        const ctx = canvas.getContext('2d');
+        await page.render({ canvasContext: ctx, viewport }).promise;
+
+        const result = await osdWorker.detect(canvas);
+        const rotation = result.rotate || 0;
+
+        pageRotations.set(pageNum, rotation);
+        return rotation;
+    } catch (err) {
+        console.warn(`Orientation detection failed for page ${pageNum + 1}:`, err);
+        pageRotations.set(pageNum, 0);
+        return 0;
+    }
+}
+
 // Perform OCR on a page using a specific worker (for parallel processing)
 async function ocrPageWithWorker(pageNum, worker) {
     // Check cache first
@@ -327,13 +436,19 @@ async function ocrPageWithWorker(pageNum, worker) {
     const scale = Math.max(300 / 72, 2); // At least 300 DPI
     const viewport = page.getViewport({ scale });
 
-    const canvas = document.createElement('canvas');
+    let canvas = document.createElement('canvas');
     canvas.width = viewport.width;
     canvas.height = viewport.height;
     const ctx = canvas.getContext('2d');
     await page.render({ canvasContext: ctx, viewport }).promise;
 
-    // Run OCR with specific worker
+    // Apply rotation correction if needed
+    const rotation = await detectPageOrientation(pageNum);
+    if (rotation !== 0) {
+        canvas = rotateCanvas(canvas, rotation);
+    }
+
+    // Run OCR with specific worker (on rotated canvas)
     const result = await worker.recognize(canvas);
 
     // Return LINE-level blocks with embedded WORD bboxes for precise matching
@@ -744,38 +859,53 @@ processBtn.addEventListener('click', async () => {
             matchesByPage[match.pageNum].push(match);
         }
 
-        // Get first page dimensions to initialize jsPDF
+        // Get first page dimensions (with rotation) to initialize jsPDF
         const firstPage = await pdf.getPage(1);
         const fp = firstPage.getViewport({ scale: 1 });
-        const doc = new jsPDF({ unit: 'pt', format: [fp.width, fp.height] });
+        const firstRotation = pageRotations.get(0) || 0;
+        const firstSwapped = firstRotation === 90 || firstRotation === 270;
+        const firstWidth = firstSwapped ? fp.height : fp.width;
+        const firstHeight = firstSwapped ? fp.width : fp.height;
+        const doc = new jsPDF({ unit: 'pt', format: [firstWidth, firstHeight] });
 
         for (let pageNum = 0; pageNum < numPages; pageNum++) {
             showProgress((pageNum / numPages) * 100, `Redacting page ${pageNum + 1} of ${numPages}...`);
 
-            if (pageNum > 0) {
-                const pg = await pdf.getPage(pageNum + 1);
-                const pv = pg.getViewport({ scale: 1 });
-                doc.addPage([pv.width, pv.height]);
-            }
-
             const page = await pdf.getPage(pageNum + 1);
             const baseVp = page.getViewport({ scale: 1 });
+            const rotation = pageRotations.get(pageNum) || 0;
+            const isSwapped = rotation === 90 || rotation === 270;
+
+            // Calculate corrected dimensions
+            const correctedWidth = isSwapped ? baseVp.height : baseVp.width;
+            const correctedHeight = isSwapped ? baseVp.width : baseVp.height;
+
+            if (pageNum > 0) {
+                doc.addPage([correctedWidth, correctedHeight]);
+            }
+
             const scale = Math.min(3, 4000 / Math.max(baseVp.width, baseVp.height));
             const viewport = page.getViewport({ scale });
 
             // 1. Render to canvas
-            const canvas = document.createElement('canvas');
+            let canvas = document.createElement('canvas');
             canvas.width = viewport.width;
             canvas.height = viewport.height;
             const ctx = canvas.getContext('2d');
             await page.render({ canvasContext: ctx, viewport }).promise;
 
-            // 2. Draw black rectangles for matches
+            // 2. Apply rotation correction
+            if (rotation !== 0) {
+                canvas = rotateCanvas(canvas, rotation);
+            }
+
+            // 3. Draw black rectangles for matches (coordinates are in corrected space)
             const pageMatches = matchesByPage[pageNum] || [];
             if (pageMatches.length > 0) {
-                ctx.fillStyle = 'black';
+                const rotatedCtx = canvas.getContext('2d');
+                rotatedCtx.fillStyle = 'black';
                 for (const match of pageMatches) {
-                    ctx.fillRect(
+                    rotatedCtx.fillRect(
                         match.bbox[0] * scale,
                         match.bbox[1] * scale,
                         (match.bbox[2] - match.bbox[0]) * scale,
@@ -784,9 +914,9 @@ processBtn.addEventListener('click', async () => {
                 }
             }
 
-            // 3. Add to PDF as JPEG
+            // 4. Add to PDF as JPEG
             const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.92);
-            doc.addImage(jpegDataUrl, 'JPEG', 0, 0, baseVp.width, baseVp.height);
+            doc.addImage(jpegDataUrl, 'JPEG', 0, 0, correctedWidth, correctedHeight);
 
             // Allow UI to update
             await new Promise(r => setTimeout(r, 0));
