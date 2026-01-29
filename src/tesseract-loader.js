@@ -9,8 +9,8 @@
 // Import the worker script as raw text
 import workerScript from 'tesseract.js/dist/worker.min.js?raw';
 
-// Import the WASM core as raw text (contains embedded base64 WASM)
-import coreScript from 'tesseract.js-core/tesseract-core-simd-lstm.wasm.js?raw';
+// Import the full WASM core (supports both LSTM OCR and legacy OSD)
+import coreScript from 'tesseract.js-core/tesseract-core-simd.wasm.js?raw';
 
 // Import language data as base64 (gzipped .traineddata.gz files)
 import nldDataBase64 from './lang-data/nld.js';
@@ -302,7 +302,7 @@ export async function createOfflineWorker(options = {}) {
 export async function createOsdWorker(options = {}) {
   const { logger = () => {} } = options;
 
-  // Create worker directly from combined script
+  // Create worker (full core supports both LSTM and legacy OSD)
   const worker = createInlineWorker();
 
   // Worker communication helpers
