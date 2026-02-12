@@ -162,6 +162,7 @@ async function handleFile(file) {
 }
 
 async function generatePreviews() {
+    console.log('[DEBUG] generatePreviews called');
     if (!pdfDocument) return;
 
     previewPlaceholder.classList.add('hidden');
@@ -170,7 +171,9 @@ async function generatePreviews() {
     pageImages = [];
 
     // Initialize OSD worker for orientation detection
+    console.log('[DEBUG] About to init OSD worker');
     await initOsdWorker();
+    console.log('[DEBUG] OSD worker init done');
 
     const numPages = pdfDocument.numPages;
 
@@ -342,11 +345,13 @@ async function initWorkerPool() {
 async function initOsdWorker() {
     if (osdWorkerReady) return;
 
+    console.log('[OSD] Initializing OSD worker...');
     try {
-        osdWorker = await createOsdWorker({ logger: () => {} });
+        osdWorker = await createOsdWorker({ logger: (m) => console.log('[OSD]', m) });
         osdWorkerReady = true;
+        console.log('[OSD] Worker ready');
     } catch (err) {
-        console.error('Failed to initialize OSD worker:', err);
+        console.error('[OSD] Failed to initialize OSD worker:', err);
         // Non-fatal: orientation detection is optional
         osdWorker = null;
     }
@@ -396,9 +401,11 @@ async function detectPageOrientation(pageNum) {
     }
 
     if (!osdWorker) {
+        console.log(`[OSD] No worker available for page ${pageNum + 1}, skipping`);
         pageRotations.set(pageNum, 0);
         return 0;
     }
+    console.log(`[OSD] Detecting orientation for page ${pageNum + 1}...`);
 
     try {
         const page = await pdfDocument.getPage(pageNum + 1);
@@ -411,13 +418,16 @@ async function detectPageOrientation(pageNum) {
         const ctx = canvas.getContext('2d');
         await page.render({ canvasContext: ctx, viewport }).promise;
 
+        console.log(`[OSD] Calling osdWorker.detect for page ${pageNum + 1}...`);
         const result = await osdWorker.detect(canvas);
+        console.log(`[OSD] Page ${pageNum + 1} result:`, result);
         const rotation = result.rotate || 0;
+        console.log(`[OSD] Page ${pageNum + 1} rotation: ${rotation}°`);
 
         pageRotations.set(pageNum, rotation);
         return rotation;
     } catch (err) {
-        console.warn(`Orientation detection failed for page ${pageNum + 1}:`, err);
+        console.error(`[OSD] Orientation detection failed for page ${pageNum + 1}:`, err);
         pageRotations.set(pageNum, 0);
         return 0;
     }
@@ -899,11 +909,11 @@ processBtn.addEventListener('click', async () => {
                 canvas = rotateCanvas(canvas, rotation);
             }
 
-            // 3. Draw black rectangles for matches (coordinates are in corrected space)
+            // 3. Draw white rectangles for matches (coordinates are in corrected space)
             const pageMatches = matchesByPage[pageNum] || [];
             if (pageMatches.length > 0) {
                 const rotatedCtx = canvas.getContext('2d');
-                rotatedCtx.fillStyle = 'black';
+                rotatedCtx.fillStyle = 'white';
                 for (const match of pageMatches) {
                     rotatedCtx.fillRect(
                         match.bbox[0] * scale,

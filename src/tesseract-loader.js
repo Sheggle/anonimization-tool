@@ -398,21 +398,23 @@ export async function createOsdWorker(options = {}) {
     detect: async (image) => {
       const imageData = await loadImage(image);
 
-      const result = await sendMessage('recognize', {
-        image: imageData,
-        options: {},
-        output: { blocks: false, text: false, hocr: false, tsv: false }
+      // Use the dedicated 'detect' action for OSD
+      const result = await sendMessage('detect', {
+        image: imageData
       });
+
+      console.log('[OSD Worker] Raw detect result:', JSON.stringify(result));
 
       // Tesseract returns orientation as 0-3 (multiples of 90 degrees counter-clockwise)
       // We convert to clockwise rotation needed to correct
-      const orientation = result.orientation || 0;
+      const orientation = result.data?.orientation || result.orientation || 0;
+      const confidence = result.data?.orientation_confidence || result.orientation_confidence || 0;
       const rotateMap = { 0: 0, 1: 270, 2: 180, 3: 90 };
 
       return {
         orientation,
         rotate: rotateMap[orientation] || 0,
-        orientationConfidence: result.orientation_confidence || 0
+        orientationConfidence: confidence
       };
     },
 
