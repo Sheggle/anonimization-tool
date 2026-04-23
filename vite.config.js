@@ -47,8 +47,10 @@ export default defineConfig({
   },
   optimizeDeps: {
     include: ['tesseract.js'],
+    exclude: ['html2canvas'],
     esbuildOptions: {
       target: 'esnext',
+      external: ['html2canvas'],
     },
   },
   build: {
