@@ -3,26 +3,33 @@ import { PATTERNS, isPattern } from './patterns.js';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfjsWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { jsPDF } from 'jspdf';
+import JSZip from 'jszip';
 import { createOfflineWorker, createOsdWorker } from './tesseract-loader.js';
 
 // PDF.js worker setup
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorkerUrl;
 
-// State
-let pdfDocument = null;
-let pdfData = null;
+// State: array of loaded documents
+// Each entry: { pdfDocument, pdfData, fileName, numPages }
+let documents = [];
+
+// Flat list of matches across all documents
+// Each entry: { text, term, bbox, docIdx, pageNum, isManual? }
 let matches = [];
-let pageImages = [];
+
+// Flat map of page metadata keyed by `${docIdx}:${pageNum}`
+// Each entry: { width, height, scale, bounds, rotation }
+const pageImages = new Map();
 
 // Drawing state for manual redaction boxes
 let isDrawing = false;
 let drawStartX = 0;
 let drawStartY = 0;
+let currentDrawingDocIdx = null;
 let currentDrawingPage = null;
 let drawPreviewElement = null;
 
-// OCR cache: Map<pageNum, blocks[]>
-// Cleared when new document is loaded
+// OCR cache keyed by `${docIdx}:${pageNum}`
 const ocrCache = new Map();
 
 // Worker pool for parallel OCR
@@ -34,16 +41,15 @@ let workerPoolReady = false;
 let osdWorker = null;
 let osdWorkerReady = false;
 
-// Page rotation cache: Map<pageNum, rotationDegrees>
-// Stores the rotation needed to correct each page (0, 90, 180, 270)
+// Page rotation cache keyed by `${docIdx}:${pageNum}`
 const pageRotations = new Map();
 
 // DOM Elements
 const fileInput = document.getElementById('fileInput');
 const uploadZone = document.getElementById('uploadZone');
 const fileInfo = document.getElementById('fileInfo');
-const fileName = document.getElementById('fileName');
-const pageCount = document.getElementById('pageCount');
+const fileListEl = document.getElementById('fileList');
+const totalPageCountEl = document.getElementById('totalPageCount');
 const termsInput = document.getElementById('termsInput');
 const scanBtn = document.getElementById('scanBtn');
 const processBtn = document.getElementById('processBtn');
@@ -57,15 +63,23 @@ const progressFill = document.getElementById('progressFill');
 const progressText = document.getElementById('progressText');
 const statusEl = document.getElementById('status');
 
+// Cache key helpers
+function pageKey(docIdx, pageNum) {
+    return `${docIdx}:${pageNum}`;
+}
+
+function pageElementId(docIdx, pageNum) {
+    return `page-${docIdx}-${pageNum}`;
+}
+
 // Coordinate transformation: display coordinates → PDF coordinates
-function displayToPdfCoords(displayX, displayY, pageNum, container) {
+function displayToPdfCoords(displayX, displayY, docIdx, pageNum, container) {
     const canvas = container.querySelector('canvas');
-    const pageInfo = pageImages[pageNum];
+    const pageInfo = pageImages.get(pageKey(docIdx, pageNum));
     if (!pageInfo || !canvas) return null;
 
     const displayScale = canvas.offsetWidth / canvas.width;
 
-    // Display → Canvas → PDF
     const canvasX = displayX / displayScale;
     const canvasY = displayY / displayScale;
     return {
@@ -112,135 +126,156 @@ uploadZone.addEventListener('drop', (e) => {
     e.preventDefault();
     uploadZone.classList.remove('dragover');
     if (e.dataTransfer.files.length) {
-        handleFile(e.dataTransfer.files[0]);
+        handleFiles(Array.from(e.dataTransfer.files));
     }
 });
 
 fileInput.addEventListener('change', (e) => {
     if (e.target.files.length) {
-        handleFile(e.target.files[0]);
+        handleFiles(Array.from(e.target.files));
     }
 });
 
-async function handleFile(file) {
-    if (!file.name.toLowerCase().endsWith('.pdf')) {
-        showStatus('Please select a PDF file', 'error');
+async function handleFiles(files) {
+    const pdfFiles = files.filter(f => f.name.toLowerCase().endsWith('.pdf'));
+    if (pdfFiles.length === 0) {
+        showStatus('Please select PDF file(s)', 'error');
         return;
     }
 
-    // Clear caches for new document
+    // Reset state for a fresh selection
+    documents = [];
+    matches = [];
+    pageImages.clear();
     ocrCache.clear();
     pageRotations.clear();
+    matchList.classList.add('hidden');
+    processBtn.disabled = true;
+    scanBtn.disabled = true;
 
-    showStatus('Loading PDF...');
+    showStatus(`Loading ${pdfFiles.length} PDF${pdfFiles.length !== 1 ? 's' : ''}...`);
 
     try {
-        pdfData = new Uint8Array(await file.arrayBuffer());
-        pdfDocument = await pdfjsLib.getDocument({ data: pdfData.slice() }).promise;
+        for (const file of pdfFiles) {
+            const pdfData = new Uint8Array(await file.arrayBuffer());
+            const pdfDocument = await pdfjsLib.getDocument({ data: pdfData.slice() }).promise;
+            documents.push({
+                pdfDocument,
+                pdfData,
+                fileName: file.name,
+                numPages: pdfDocument.numPages
+            });
+        }
 
-        const numPages = pdfDocument.numPages;
-
-        fileName.textContent = file.name;
-        pageCount.textContent = `${numPages} page${numPages !== 1 ? 's' : ''}`;
+        renderFileList();
         fileInfo.classList.add('visible');
-
-        scanBtn.disabled = false;
+        scanBtn.disabled = !termsInput.value.trim();
         hideStatus();
 
-        // Clear previous matches
-        matches = [];
-        matchList.classList.add('hidden');
-        processBtn.disabled = true;
-
-        // Generate previews
         await generatePreviews();
-
     } catch (err) {
         console.error(err);
         showStatus(`Error loading PDF: ${err.message}`, 'error');
     }
 }
 
+function renderFileList() {
+    fileListEl.innerHTML = '';
+    let totalPages = 0;
+    for (const doc of documents) {
+        totalPages += doc.numPages;
+        const item = document.createElement('div');
+        item.className = 'file-list-item';
+        item.innerHTML = `
+            <span class="file-list-name">${escapeHtml(doc.fileName)}</span>
+            <span class="file-list-pages">${doc.numPages} page${doc.numPages !== 1 ? 's' : ''}</span>
+        `;
+        fileListEl.appendChild(item);
+    }
+    totalPageCountEl.textContent = `${documents.length} file${documents.length !== 1 ? 's' : ''} · ${totalPages} total page${totalPages !== 1 ? 's' : ''}`;
+}
+
 async function generatePreviews() {
-    console.log('[DEBUG] generatePreviews called');
-    if (!pdfDocument) return;
+    if (documents.length === 0) return;
 
     previewPlaceholder.classList.add('hidden');
     previewScroll.classList.remove('hidden');
     previewScroll.innerHTML = '';
-    pageImages = [];
 
-    // Initialize OSD worker for orientation detection
-    console.log('[DEBUG] About to init OSD worker');
     await initOsdWorker();
-    console.log('[DEBUG] OSD worker init done');
 
-    const numPages = pdfDocument.numPages;
+    for (let docIdx = 0; docIdx < documents.length; docIdx++) {
+        const { pdfDocument, fileName, numPages } = documents[docIdx];
 
-    for (let i = 0; i < numPages; i++) {
-        const page = await pdfDocument.getPage(i + 1); // PDF.js is 1-indexed
-        const baseViewport = page.getViewport({ scale: 1 });
-        const origWidth = baseViewport.width;
-        const origHeight = baseViewport.height;
+        // Document separator
+        const separator = document.createElement('div');
+        separator.className = 'doc-separator';
+        separator.innerHTML = `
+            <div class="doc-name">${escapeHtml(fileName)}</div>
+            <div class="doc-meta">File ${docIdx + 1} of ${documents.length} · ${numPages} page${numPages !== 1 ? 's' : ''}</div>
+        `;
+        previewScroll.appendChild(separator);
 
-        // Render at reasonable scale for preview
-        const scale = Math.min(800 / origWidth, 1.5);
-        const viewport = page.getViewport({ scale });
+        for (let i = 0; i < numPages; i++) {
+            const page = await pdfDocument.getPage(i + 1);
+            const baseViewport = page.getViewport({ scale: 1 });
+            const origWidth = baseViewport.width;
+            const origHeight = baseViewport.height;
 
-        let canvas = document.createElement('canvas');
-        canvas.width = viewport.width;
-        canvas.height = viewport.height;
-        const ctx = canvas.getContext('2d');
-        await page.render({ canvasContext: ctx, viewport }).promise;
+            const scale = Math.min(800 / origWidth, 1.5);
+            const viewport = page.getViewport({ scale });
 
-        // Detect and apply orientation correction
-        const rotation = await detectPageOrientation(i);
-        if (rotation !== 0) {
-            canvas = rotateCanvas(canvas, rotation);
+            let canvas = document.createElement('canvas');
+            canvas.width = viewport.width;
+            canvas.height = viewport.height;
+            const ctx = canvas.getContext('2d');
+            await page.render({ canvasContext: ctx, viewport }).promise;
+
+            const rotation = await detectPageOrientation(docIdx, i);
+            if (rotation !== 0) {
+                canvas = rotateCanvas(canvas, rotation);
+            }
+
+            const isSwapped = rotation === 90 || rotation === 270;
+            const width = isSwapped ? origHeight : origWidth;
+            const height = isSwapped ? origWidth : origHeight;
+
+            pageImages.set(pageKey(docIdx, i), {
+                width,
+                height,
+                scale,
+                bounds: [0, 0, width, height],
+                rotation
+            });
+
+            const container = document.createElement('div');
+            container.className = 'page-preview';
+            container.id = pageElementId(docIdx, i);
+
+            const label = document.createElement('div');
+            label.className = 'page-label';
+            label.textContent = `Page ${i + 1}`;
+
+            container.appendChild(canvas);
+            container.appendChild(label);
+            previewScroll.appendChild(container);
+
+            attachDrawingHandlers(container, docIdx, i);
+
+            await new Promise(r => setTimeout(r, 0));
         }
-
-        // Store corrected dimensions (swap for 90/270 rotation)
-        const isSwapped = rotation === 90 || rotation === 270;
-        const width = isSwapped ? origHeight : origWidth;
-        const height = isSwapped ? origWidth : origHeight;
-
-        pageImages.push({
-            width,
-            height,
-            scale,
-            bounds: [0, 0, width, height],
-            rotation
-        });
-
-        const container = document.createElement('div');
-        container.className = 'page-preview';
-        container.id = `page-${i}`;
-
-        const label = document.createElement('div');
-        label.className = 'page-label';
-        label.textContent = `Page ${i + 1}`;
-
-        container.appendChild(canvas);
-        container.appendChild(label);
-        previewScroll.appendChild(container);
-
-        // Attach drawing handlers for manual redaction
-        attachDrawingHandlers(container, i);
-
-        // Yield to let the browser paint each page progressively
-        await new Promise(r => setTimeout(r, 0));
     }
 }
 
 // Term input handler
 termsInput.addEventListener('input', () => {
-    scanBtn.disabled = !pdfDocument || !termsInput.value.trim();
+    scanBtn.disabled = documents.length === 0 || !termsInput.value.trim();
 });
 
 // Estimate bounding box for a substring within a text block (fallback)
 function estimateBbox(block, charIndex, charLength) {
     const text = block.text;
-    const bbox = block.bbox; // [x0, y0, x1, y1]
+    const bbox = block.bbox;
 
     if (!text || text.length === 0) return bbox;
 
@@ -259,7 +294,6 @@ function findMatchBbox(block, matchText, charIndex) {
         return estimateBbox(block, charIndex, matchText.length);
     }
 
-    // Build character position → word mapping (with position within word)
     let charPos = 0;
     const charToWord = [];
     for (const word of block.words) {
@@ -267,9 +301,8 @@ function findMatchBbox(block, matchText, charIndex) {
             charToWord.push({ word, posInWord: i });
         }
         charPos += word.text.length;
-        // Account for space between words
         if (charPos < block.text.length && block.text[charPos] === ' ') {
-            charToWord.push(null); // space
+            charToWord.push(null);
             charPos++;
         }
     }
@@ -277,8 +310,7 @@ function findMatchBbox(block, matchText, charIndex) {
     const startIdx = charIndex;
     const endIdx = charIndex + matchText.length - 1;
 
-    // Collect matched words with their character ranges
-    const wordRanges = new Map(); // word -> { startPos, endPos }
+    const wordRanges = new Map();
     for (let i = startIdx; i <= endIdx && i < charToWord.length; i++) {
         const entry = charToWord[i];
         if (entry) {
@@ -294,7 +326,6 @@ function findMatchBbox(block, matchText, charIndex) {
         return estimateBbox(block, charIndex, matchText.length);
     }
 
-    // Calculate bbox: for partial matches, interpolate within the word
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 
     for (const [word, range] of wordRanges) {
@@ -302,12 +333,10 @@ function findMatchBbox(block, matchText, charIndex) {
         const wordWidth = word.bbox[2] - word.bbox[0];
         const charWidth = wordWidth / wordLen;
 
-        // If full word matched, use full bbox
         if (range.startPos === 0 && range.endPos === wordLen - 1) {
             minX = Math.min(minX, word.bbox[0]);
             maxX = Math.max(maxX, word.bbox[2]);
         } else {
-            // Partial match: interpolate within word
             const x0 = word.bbox[0] + range.startPos * charWidth;
             const x1 = word.bbox[0] + (range.endPos + 1) * charWidth;
             minX = Math.min(minX, x0);
@@ -320,7 +349,6 @@ function findMatchBbox(block, matchText, charIndex) {
     return [minX, minY, maxX, maxY];
 }
 
-// Initialize worker pool for parallel OCR
 async function initWorkerPool() {
     if (workerPoolReady) return;
 
@@ -341,23 +369,18 @@ async function initWorkerPool() {
     }
 }
 
-// Initialize OSD worker for orientation detection
 async function initOsdWorker() {
     if (osdWorkerReady) return;
 
-    console.log('[OSD] Initializing OSD worker...');
     try {
-        osdWorker = await createOsdWorker({ logger: (m) => console.log('[OSD]', m) });
+        osdWorker = await createOsdWorker({ logger: () => {} });
         osdWorkerReady = true;
-        console.log('[OSD] Worker ready');
     } catch (err) {
         console.error('[OSD] Failed to initialize OSD worker:', err);
-        // Non-fatal: orientation detection is optional
         osdWorker = null;
     }
 }
 
-// Rotate a canvas by the given degrees (90, 180, 270)
 function rotateCanvas(canvas, degrees) {
     if (degrees === 0) return canvas;
 
@@ -384,7 +407,6 @@ function rotateCanvas(canvas, degrees) {
         rotatedCtx.rotate(-Math.PI / 2);
     }
 
-    // Draw original image onto rotated canvas
     const tempCanvas = document.createElement('canvas');
     tempCanvas.width = canvas.width;
     tempCanvas.height = canvas.height;
@@ -394,22 +416,20 @@ function rotateCanvas(canvas, degrees) {
     return rotatedCanvas;
 }
 
-// Detect orientation for a page and cache the result
-async function detectPageOrientation(pageNum) {
-    if (pageRotations.has(pageNum)) {
-        return pageRotations.get(pageNum);
+async function detectPageOrientation(docIdx, pageNum) {
+    const key = pageKey(docIdx, pageNum);
+    if (pageRotations.has(key)) {
+        return pageRotations.get(key);
     }
 
     if (!osdWorker) {
-        console.log(`[OSD] No worker available for page ${pageNum + 1}, skipping`);
-        pageRotations.set(pageNum, 0);
+        pageRotations.set(key, 0);
         return 0;
     }
-    console.log(`[OSD] Detecting orientation for page ${pageNum + 1}...`);
 
     try {
-        const page = await pdfDocument.getPage(pageNum + 1);
-        const scale = Math.max(150 / 72, 1); // Lower res for faster OSD
+        const page = await documents[docIdx].pdfDocument.getPage(pageNum + 1);
+        const scale = Math.max(150 / 72, 1);
         const viewport = page.getViewport({ scale });
 
         const canvas = document.createElement('canvas');
@@ -418,32 +438,27 @@ async function detectPageOrientation(pageNum) {
         const ctx = canvas.getContext('2d');
         await page.render({ canvasContext: ctx, viewport }).promise;
 
-        console.log(`[OSD] Calling osdWorker.detect for page ${pageNum + 1}...`);
         const result = await osdWorker.detect(canvas);
-        console.log(`[OSD] Page ${pageNum + 1} result:`, result);
         const rotation = result.rotate || 0;
-        console.log(`[OSD] Page ${pageNum + 1} rotation: ${rotation}°`);
 
-        pageRotations.set(pageNum, rotation);
+        pageRotations.set(key, rotation);
         return rotation;
     } catch (err) {
-        console.error(`[OSD] Orientation detection failed for page ${pageNum + 1}:`, err);
-        pageRotations.set(pageNum, 0);
+        console.error(`[OSD] Orientation detection failed for doc ${docIdx} page ${pageNum + 1}:`, err);
+        pageRotations.set(key, 0);
         return 0;
     }
 }
 
-// Perform OCR on a page using a specific worker (for parallel processing)
-async function ocrPageWithWorker(pageNum, worker) {
-    // Check cache first
-    if (ocrCache.has(pageNum)) {
-        return { pageNum, blocks: ocrCache.get(pageNum) };
+async function ocrPageWithWorker(docIdx, pageNum, worker) {
+    const key = pageKey(docIdx, pageNum);
+    if (ocrCache.has(key)) {
+        return { docIdx, pageNum, blocks: ocrCache.get(key) };
     }
 
-    const page = await pdfDocument.getPage(pageNum + 1); // PDF.js is 1-indexed
+    const page = await documents[docIdx].pdfDocument.getPage(pageNum + 1);
 
-    // Render at high resolution for OCR
-    const scale = Math.max(300 / 72, 2); // At least 300 DPI
+    const scale = Math.max(300 / 72, 2);
     const viewport = page.getViewport({ scale });
 
     let canvas = document.createElement('canvas');
@@ -452,16 +467,13 @@ async function ocrPageWithWorker(pageNum, worker) {
     const ctx = canvas.getContext('2d');
     await page.render({ canvasContext: ctx, viewport }).promise;
 
-    // Apply rotation correction if needed
-    const rotation = await detectPageOrientation(pageNum);
+    const rotation = await detectPageOrientation(docIdx, pageNum);
     if (rotation !== 0) {
         canvas = rotateCanvas(canvas, rotation);
     }
 
-    // Run OCR with specific worker (on rotated canvas)
     const result = await worker.recognize(canvas);
 
-    // Return LINE-level blocks with embedded WORD bboxes for precise matching
     const blocks = [];
     for (const line of result.data.lines) {
         const words = line.words.map(word => ({
@@ -484,44 +496,34 @@ async function ocrPageWithWorker(pageNum, worker) {
             ],
             type: 'ocr',
             confidence: line.confidence,
-            words  // word-level data for precise bbox lookup
+            words
         });
     }
 
-    // Cache result
-    ocrCache.set(pageNum, blocks);
-    return { pageNum, blocks };
+    ocrCache.set(key, blocks);
+    return { docIdx, pageNum, blocks };
 }
 
-// Process multiple pages in parallel using worker pool
-async function ocrPagesParallel(pageNumbers, onProgress) {
-    const results = new Map();
+async function ocrPagesParallel(pageRefs, onProgress) {
     let completed = 0;
 
-    // Process in batches of WORKER_POOL_SIZE
-    for (let i = 0; i < pageNumbers.length; i += WORKER_POOL_SIZE) {
-        const batch = pageNumbers.slice(i, i + WORKER_POOL_SIZE);
+    for (let i = 0; i < pageRefs.length; i += WORKER_POOL_SIZE) {
+        const batch = pageRefs.slice(i, i + WORKER_POOL_SIZE);
 
-        const batchPromises = batch.map((pageNum, idx) =>
-            ocrPageWithWorker(pageNum, workerPool[idx])
+        const batchPromises = batch.map(({ docIdx, pageNum }, idx) =>
+            ocrPageWithWorker(docIdx, pageNum, workerPool[idx])
         );
 
-        const batchResults = await Promise.all(batchPromises);
-
-        for (const { pageNum, blocks } of batchResults) {
-            results.set(pageNum, blocks);
-        }
+        await Promise.all(batchPromises);
 
         completed += batch.length;
-        onProgress(completed, pageNumbers.length);
+        onProgress(completed, pageRefs.length);
     }
-
-    return results;
 }
 
 // Scan for matches
 scanBtn.addEventListener('click', async () => {
-    if (!pdfDocument || !termsInput.value.trim()) return;
+    if (documents.length === 0 || !termsInput.value.trim()) return;
 
     showStatus('Scanning for matches...');
     // Preserve manual redactions when rescanning
@@ -533,74 +535,73 @@ scanBtn.addEventListener('click', async () => {
         .map(t => t.trim())
         .filter(t => t);
 
-    const numPages = pdfDocument.numPages;
-
-    // PHASE 1: OCR all pages (with caching)
+    // Collect all pages across all documents
     const allPages = [];
-    for (let i = 0; i < numPages; i++) {
-        allPages.push(i);
+    for (let docIdx = 0; docIdx < documents.length; docIdx++) {
+        for (let p = 0; p < documents[docIdx].numPages; p++) {
+            allPages.push({ docIdx, pageNum: p });
+        }
     }
 
-    const uncachedPages = allPages.filter(p => !ocrCache.has(p));
+    const uncachedPages = allPages.filter(({ docIdx, pageNum }) => !ocrCache.has(pageKey(docIdx, pageNum)));
 
     if (uncachedPages.length > 0) {
         try {
             await initWorkerPool();
         } catch (err) {
-            return; // Error already shown
+            return;
         }
 
-        showStatus(`Running OCR on ${uncachedPages.length} pages...`);
+        showStatus(`Running OCR on ${uncachedPages.length} page${uncachedPages.length !== 1 ? 's' : ''}...`);
 
         await ocrPagesParallel(uncachedPages, (done, total) => {
             showProgress((done / total) * 50, `OCR: ${done}/${total} pages`);
         });
     }
 
-    // PHASE 2: Search OCR results for matches
-    for (let pageNum = 0; pageNum < numPages; pageNum++) {
-        showProgress(50 + (pageNum / numPages) * 50, `Searching page ${pageNum + 1} of ${numPages}...`);
+    // Search OCR results
+    for (let i = 0; i < allPages.length; i++) {
+        const { docIdx, pageNum } = allPages[i];
+        showProgress(50 + (i / allPages.length) * 50, `Searching ${documents[docIdx].fileName} page ${pageNum + 1}...`);
 
-        if (ocrCache.has(pageNum)) {
-            const ocrBlocks = ocrCache.get(pageNum);
-            for (const term of terms) {
-                let regex, validate;
-                if (isPattern(term)) {
-                    const pattern = PATTERNS[term];
-                    regex = new RegExp(pattern.regex.source, pattern.regex.flags);
-                    validate = pattern.validate;
-                } else {
-                    try {
-                        regex = new RegExp(term, 'gi');
-                    } catch (e) {
-                        regex = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
-                    }
-                    validate = () => true;
+        const blocks = ocrCache.get(pageKey(docIdx, pageNum));
+        if (!blocks) continue;
+
+        for (const term of terms) {
+            let regex, validate;
+            if (isPattern(term)) {
+                const pattern = PATTERNS[term];
+                regex = new RegExp(pattern.regex.source, pattern.regex.flags);
+                validate = pattern.validate;
+            } else {
+                try {
+                    regex = new RegExp(term, 'gi');
+                } catch (e) {
+                    regex = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
                 }
+                validate = () => true;
+            }
 
-                for (const block of ocrBlocks) {
-                    regex.lastIndex = 0;
-                    let match;
-                    while ((match = regex.exec(block.text)) !== null) {
-                        if (!validate(match[0])) continue;
-                        // Get precise bbox using word-level OCR data
-                        const estBbox = findMatchBbox(block, match[0], match.index);
-                        matches.push({
-                            text: match[0],
-                            term,
-                            bbox: estBbox,
-                            pageNum
-                        });
-                    }
+            for (const block of blocks) {
+                regex.lastIndex = 0;
+                let match;
+                while ((match = regex.exec(block.text)) !== null) {
+                    if (!validate(match[0])) continue;
+                    const estBbox = findMatchBbox(block, match[0], match.index);
+                    matches.push({
+                        text: match[0],
+                        term,
+                        bbox: estBbox,
+                        docIdx,
+                        pageNum
+                    });
                 }
             }
         }
 
-        // Allow UI to update
         await new Promise(r => setTimeout(r, 0));
     }
 
-    // Update UI with matches
     updateMatchDisplay();
     hideProgress();
 
@@ -618,55 +619,56 @@ function updateMatchDisplay() {
     matchCount.textContent = matches.length;
     matchItems.innerHTML = '';
 
-    // Group by page
-    const byPage = {};
+    // Group by doc then page
+    const byDocPage = new Map();
     for (const match of matches) {
-        if (!byPage[match.pageNum]) byPage[match.pageNum] = [];
-        byPage[match.pageNum].push(match);
+        const key = pageKey(match.docIdx, match.pageNum);
+        if (!byDocPage.has(key)) byDocPage.set(key, []);
+        byDocPage.get(key).push(match);
     }
 
-    // Display matches
-    for (const [pageNum, pageMatches] of Object.entries(byPage)) {
+    for (const [key, pageMatches] of byDocPage) {
+        const [docIdx, pageNum] = key.split(':').map(Number);
+        const label = documents.length > 1
+            ? `${documents[docIdx].fileName} · Page ${pageNum + 1}`
+            : `Page ${pageNum + 1}`;
+
         for (const match of pageMatches.slice(0, 5)) {
             const item = document.createElement('div');
             item.className = 'match-item';
             item.innerHTML = `
                 <span class="match-term">"${escapeHtml(match.text.substring(0, 30))}${match.text.length > 30 ? '...' : ''}"</span>
-                <span class="match-page">Page ${parseInt(pageNum) + 1}</span>
+                <span class="match-page">${escapeHtml(label)}</span>
             `;
             matchItems.appendChild(item);
         }
         if (pageMatches.length > 5) {
             const more = document.createElement('div');
             more.className = 'match-item';
-            more.innerHTML = `<span style="color: var(--text-muted)">...and ${pageMatches.length - 5} more on page ${parseInt(pageNum) + 1}</span>`;
+            more.innerHTML = `<span style="color: var(--text-muted)">...and ${pageMatches.length - 5} more on ${escapeHtml(label)}</span>`;
             matchItems.appendChild(more);
         }
     }
 
-    // Draw overlays on preview
     drawMatchOverlays();
 }
 
-// Create and append a single overlay div for a match at the given index
 function createOverlayForMatch(match, index) {
-    const pageContainer = document.getElementById(`page-${match.pageNum}`);
+    const pageContainer = document.getElementById(pageElementId(match.docIdx, match.pageNum));
     if (!pageContainer) return;
 
     const canvas = pageContainer.querySelector('canvas');
-    const pageInfo = pageImages[match.pageNum];
-    if (!pageInfo) return;
+    const pageInfo = pageImages.get(pageKey(match.docIdx, match.pageNum));
+    if (!pageInfo || !canvas) return;
 
     const bbox = match.bbox;
     const scale = pageInfo.scale;
 
-    // Convert PDF coordinates to canvas coordinates
     const x = bbox[0] * scale;
     const y = bbox[1] * scale;
     const width = (bbox[2] - bbox[0]) * scale;
     const height = (bbox[3] - bbox[1]) * scale;
 
-    // Scale to displayed size
     const displayScale = canvas.offsetWidth / canvas.width;
 
     const overlay = document.createElement('div');
@@ -679,7 +681,6 @@ function createOverlayForMatch(match, index) {
     overlay.style.width = `${width * displayScale}px`;
     overlay.style.height = `${height * displayScale}px`;
 
-    // Add delete button for manual overlays
     if (match.isManual) {
         const deleteBtn = document.createElement('button');
         deleteBtn.className = 'overlay-delete-btn';
@@ -696,7 +697,6 @@ function createOverlayForMatch(match, index) {
 }
 
 function drawMatchOverlays() {
-    // Remove existing overlays
     document.querySelectorAll('.match-overlay').forEach(el => el.remove());
 
     for (let i = 0; i < matches.length; i++) {
@@ -704,21 +704,19 @@ function drawMatchOverlays() {
     }
 }
 
-// Manual redaction management
-function addManualRedaction(pageNum, bbox) {
+function addManualRedaction(docIdx, pageNum, bbox) {
     const match = {
         text: '[Manual Redaction]',
         term: '__manual__',
-        bbox: bbox,
-        pageNum: pageNum,
+        bbox,
+        docIdx,
+        pageNum,
         isManual: true
     };
     matches.push(match);
 
-    // Incrementally append just the new overlay instead of rebuilding all overlays
     createOverlayForMatch(match, matches.length - 1);
 
-    // Update the match list text (but skip the full drawMatchOverlays rebuild)
     matchList.classList.remove('hidden');
     matchCount.textContent = matches.length;
 
@@ -735,12 +733,9 @@ function removeManualRedaction(index) {
     }
 }
 
-// Drawing event handlers
-function handleDrawStart(e, pageNum, container) {
-    // Only start drawing with left mouse button
+function handleDrawStart(e, docIdx, pageNum, container) {
     if (e.button !== 0) return;
 
-    // Don't start drawing if clicking on an overlay or delete button
     if (e.target.classList.contains('match-overlay') ||
         e.target.classList.contains('overlay-delete-btn') ||
         e.target.closest('.manual-overlay')) {
@@ -751,11 +746,11 @@ function handleDrawStart(e, pageNum, container) {
     const rect = canvas.getBoundingClientRect();
 
     isDrawing = true;
+    currentDrawingDocIdx = docIdx;
     currentDrawingPage = pageNum;
     drawStartX = e.clientX - rect.left;
     drawStartY = e.clientY - rect.top;
 
-    // Create preview element
     drawPreviewElement = document.createElement('div');
     drawPreviewElement.className = 'draw-preview';
     drawPreviewElement.style.left = `${drawStartX}px`;
@@ -776,7 +771,6 @@ function handleDrawMove(e, container) {
     const currentX = e.clientX - rect.left;
     const currentY = e.clientY - rect.top;
 
-    // Calculate dimensions (handle negative drag)
     const left = Math.min(drawStartX, currentX);
     const top = Math.min(drawStartY, currentY);
     const width = Math.abs(currentX - drawStartX);
@@ -788,7 +782,7 @@ function handleDrawMove(e, container) {
     drawPreviewElement.style.height = `${height}px`;
 }
 
-function handleDrawEnd(e, pageNum, container) {
+function handleDrawEnd(e, docIdx, pageNum, container) {
     if (!isDrawing) return;
 
     const canvas = container.querySelector('canvas');
@@ -797,38 +791,33 @@ function handleDrawEnd(e, pageNum, container) {
     const endX = e.clientX - rect.left;
     const endY = e.clientY - rect.top;
 
-    // Calculate final dimensions
     const left = Math.min(drawStartX, endX);
     const top = Math.min(drawStartY, endY);
     const width = Math.abs(endX - drawStartX);
     const height = Math.abs(endY - drawStartY);
 
-    // Remove preview element
     if (drawPreviewElement) {
         drawPreviewElement.remove();
         drawPreviewElement = null;
     }
 
-    // Only create redaction if box is at least 5px in both dimensions
     if (width >= 5 && height >= 5) {
-        // Convert display coordinates to PDF coordinates
-        const topLeft = displayToPdfCoords(left, top, pageNum, container);
-        const bottomRight = displayToPdfCoords(left + width, top + height, pageNum, container);
+        const topLeft = displayToPdfCoords(left, top, docIdx, pageNum, container);
+        const bottomRight = displayToPdfCoords(left + width, top + height, docIdx, pageNum, container);
 
         if (topLeft && bottomRight) {
-            // Create normalized bbox [x0, y0, x1, y1]
             const bbox = [
                 Math.min(topLeft.x, bottomRight.x),
                 Math.min(topLeft.y, bottomRight.y),
                 Math.max(topLeft.x, bottomRight.x),
                 Math.max(topLeft.y, bottomRight.y)
             ];
-            addManualRedaction(pageNum, bbox);
+            addManualRedaction(docIdx, pageNum, bbox);
         }
     }
 
-    // Reset drawing state
     isDrawing = false;
+    currentDrawingDocIdx = null;
     currentDrawingPage = null;
 }
 
@@ -838,108 +827,158 @@ function handleDrawCancel() {
         drawPreviewElement = null;
     }
     isDrawing = false;
+    currentDrawingDocIdx = null;
     currentDrawingPage = null;
 }
 
-// Attach drawing handlers to a page container
-function attachDrawingHandlers(container, pageNum) {
-    container.addEventListener('mousedown', (e) => handleDrawStart(e, pageNum, container));
+function attachDrawingHandlers(container, docIdx, pageNum) {
+    container.addEventListener('mousedown', (e) => handleDrawStart(e, docIdx, pageNum, container));
     container.addEventListener('mousemove', (e) => handleDrawMove(e, container));
-    container.addEventListener('mouseup', (e) => handleDrawEnd(e, pageNum, container));
+    container.addEventListener('mouseup', (e) => handleDrawEnd(e, docIdx, pageNum, container));
     container.addEventListener('mouseleave', handleDrawCancel);
+}
+
+// Build a single redacted PDF for a given document
+async function buildRedactedPdf(docIdx, onPageProgress) {
+    const { pdfData } = documents[docIdx];
+    const pdf = await pdfjsLib.getDocument({ data: pdfData.slice() }).promise;
+    const numPages = pdf.numPages;
+
+    const docMatches = matches.filter(m => m.docIdx === docIdx);
+    const matchesByPage = {};
+    for (const match of docMatches) {
+        if (!matchesByPage[match.pageNum]) matchesByPage[match.pageNum] = [];
+        matchesByPage[match.pageNum].push(match);
+    }
+
+    const firstPage = await pdf.getPage(1);
+    const fp = firstPage.getViewport({ scale: 1 });
+    const firstRotation = pageRotations.get(pageKey(docIdx, 0)) || 0;
+    const firstSwapped = firstRotation === 90 || firstRotation === 270;
+    const firstWidth = firstSwapped ? fp.height : fp.width;
+    const firstHeight = firstSwapped ? fp.width : fp.height;
+    const doc = new jsPDF({ unit: 'pt', format: [firstWidth, firstHeight] });
+
+    for (let pageNum = 0; pageNum < numPages; pageNum++) {
+        if (onPageProgress) onPageProgress(pageNum, numPages);
+
+        const page = await pdf.getPage(pageNum + 1);
+        const baseVp = page.getViewport({ scale: 1 });
+        const rotation = pageRotations.get(pageKey(docIdx, pageNum)) || 0;
+        const isSwapped = rotation === 90 || rotation === 270;
+
+        const correctedWidth = isSwapped ? baseVp.height : baseVp.width;
+        const correctedHeight = isSwapped ? baseVp.width : baseVp.height;
+
+        if (pageNum > 0) {
+            doc.addPage([correctedWidth, correctedHeight]);
+        }
+
+        const scale = Math.min(3, 4000 / Math.max(baseVp.width, baseVp.height));
+        const viewport = page.getViewport({ scale });
+
+        let canvas = document.createElement('canvas');
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        const ctx = canvas.getContext('2d');
+        await page.render({ canvasContext: ctx, viewport }).promise;
+
+        if (rotation !== 0) {
+            canvas = rotateCanvas(canvas, rotation);
+        }
+
+        const pageMatches = matchesByPage[pageNum] || [];
+        if (pageMatches.length > 0) {
+            const rotatedCtx = canvas.getContext('2d');
+            rotatedCtx.fillStyle = 'white';
+            for (const match of pageMatches) {
+                rotatedCtx.fillRect(
+                    match.bbox[0] * scale,
+                    match.bbox[1] * scale,
+                    (match.bbox[2] - match.bbox[0]) * scale,
+                    (match.bbox[3] - match.bbox[1]) * scale
+                );
+            }
+        }
+
+        const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.92);
+        doc.addImage(jpegDataUrl, 'JPEG', 0, 0, correctedWidth, correctedHeight);
+
+        await new Promise(r => setTimeout(r, 0));
+    }
+
+    return doc.output('blob');
+}
+
+function anonymizedFileName(originalName) {
+    return originalName.replace(/\.pdf$/i, '') + '_anonymized.pdf';
+}
+
+function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
 }
 
 // Process and download
 processBtn.addEventListener('click', async () => {
-    if (!pdfDocument || matches.length === 0) return;
+    if (documents.length === 0 || matches.length === 0) return;
 
     showStatus('Applying redactions...');
     processBtn.disabled = true;
     scanBtn.disabled = true;
 
     try {
-        // Reload document fresh for rendering
-        const pdf = await pdfjsLib.getDocument({ data: pdfData.slice() }).promise;
-        const numPages = pdf.numPages;
+        const totalPages = documents.reduce((s, d) => s + d.numPages, 0);
+        let pagesDone = 0;
 
-        // Group matches by page
-        const matchesByPage = {};
-        for (const match of matches) {
-            if (!matchesByPage[match.pageNum]) matchesByPage[match.pageNum] = [];
-            matchesByPage[match.pageNum].push(match);
+        const blobs = [];
+        for (let docIdx = 0; docIdx < documents.length; docIdx++) {
+            const doc = documents[docIdx];
+            const blob = await buildRedactedPdf(docIdx, (pageNum, numPages) => {
+                const percent = ((pagesDone + pageNum) / totalPages) * 100;
+                showProgress(percent, `Redacting ${doc.fileName} (page ${pageNum + 1}/${numPages})...`);
+            });
+            pagesDone += doc.numPages;
+            blobs.push({ blob, fileName: anonymizedFileName(doc.fileName) });
         }
 
-        // Get first page dimensions (with rotation) to initialize jsPDF
-        const firstPage = await pdf.getPage(1);
-        const fp = firstPage.getViewport({ scale: 1 });
-        const firstRotation = pageRotations.get(0) || 0;
-        const firstSwapped = firstRotation === 90 || firstRotation === 270;
-        const firstWidth = firstSwapped ? fp.height : fp.width;
-        const firstHeight = firstSwapped ? fp.width : fp.height;
-        const doc = new jsPDF({ unit: 'pt', format: [firstWidth, firstHeight] });
-
-        for (let pageNum = 0; pageNum < numPages; pageNum++) {
-            showProgress((pageNum / numPages) * 100, `Redacting page ${pageNum + 1} of ${numPages}...`);
-
-            const page = await pdf.getPage(pageNum + 1);
-            const baseVp = page.getViewport({ scale: 1 });
-            const rotation = pageRotations.get(pageNum) || 0;
-            const isSwapped = rotation === 90 || rotation === 270;
-
-            // Calculate corrected dimensions
-            const correctedWidth = isSwapped ? baseVp.height : baseVp.width;
-            const correctedHeight = isSwapped ? baseVp.width : baseVp.height;
-
-            if (pageNum > 0) {
-                doc.addPage([correctedWidth, correctedHeight]);
-            }
-
-            const scale = Math.min(3, 4000 / Math.max(baseVp.width, baseVp.height));
-            const viewport = page.getViewport({ scale });
-
-            // 1. Render to canvas
-            let canvas = document.createElement('canvas');
-            canvas.width = viewport.width;
-            canvas.height = viewport.height;
-            const ctx = canvas.getContext('2d');
-            await page.render({ canvasContext: ctx, viewport }).promise;
-
-            // 2. Apply rotation correction
-            if (rotation !== 0) {
-                canvas = rotateCanvas(canvas, rotation);
-            }
-
-            // 3. Draw white rectangles for matches (coordinates are in corrected space)
-            const pageMatches = matchesByPage[pageNum] || [];
-            if (pageMatches.length > 0) {
-                const rotatedCtx = canvas.getContext('2d');
-                rotatedCtx.fillStyle = 'white';
-                for (const match of pageMatches) {
-                    rotatedCtx.fillRect(
-                        match.bbox[0] * scale,
-                        match.bbox[1] * scale,
-                        (match.bbox[2] - match.bbox[0]) * scale,
-                        (match.bbox[3] - match.bbox[1]) * scale
-                    );
+        if (blobs.length === 1) {
+            showProgress(95, 'Saving PDF...');
+            downloadBlob(blobs[0].blob, blobs[0].fileName);
+        } else {
+            showProgress(95, 'Creating zip archive...');
+            const zip = new JSZip();
+            // Ensure unique filenames inside the zip
+            const seen = new Map();
+            for (const { blob, fileName } of blobs) {
+                let name = fileName;
+                if (seen.has(name)) {
+                    const count = seen.get(name) + 1;
+                    seen.set(name, count);
+                    const base = name.replace(/\.pdf$/i, '');
+                    name = `${base} (${count}).pdf`;
+                } else {
+                    seen.set(name, 1);
                 }
+                zip.file(name, blob);
             }
-
-            // 4. Add to PDF as JPEG
-            const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.92);
-            doc.addImage(jpegDataUrl, 'JPEG', 0, 0, correctedWidth, correctedHeight);
-
-            // Allow UI to update
-            await new Promise(r => setTimeout(r, 0));
+            const zipBlob = await zip.generateAsync({ type: 'blob' });
+            downloadBlob(zipBlob, 'anonymized_pdfs.zip');
         }
-
-        showProgress(90, 'Saving PDF...');
-
-        // 4. Download
-        doc.save(fileName.textContent.replace('.pdf', '_anonymized.pdf'));
 
         hideProgress();
-        showStatus('PDF anonymized and downloaded successfully!', 'success');
-
+        showStatus(
+            blobs.length === 1
+                ? 'PDF anonymized and downloaded successfully!'
+                : `${blobs.length} PDFs anonymized and zipped successfully!`,
+            'success'
+        );
     } catch (err) {
         console.error(err);
         showStatus(`Error during redaction: ${err.message}`, 'error');
@@ -949,7 +988,6 @@ processBtn.addEventListener('click', async () => {
     }
 });
 
-// Utility
 function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
@@ -967,6 +1005,5 @@ window.addEventListener('resize', () => {
     }, 200);
 });
 
-// Initialize
 console.log('PDF Anonymizer loaded. PDF.js ready.');
 hideStatus();

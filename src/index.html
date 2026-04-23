@@ -17,15 +17,15 @@
         <div class="grid">
             <!-- File Upload -->
             <div class="card">
-                <h2>1. Upload PDF</h2>
+                <h2>1. Upload PDFs</h2>
                 <div class="upload-zone" id="uploadZone">
-                    <input type="file" id="fileInput" accept=".pdf">
+                    <input type="file" id="fileInput" accept=".pdf" multiple>
                     <div class="icon">📄</div>
-                    <p>Click or drag PDF here</p>
+                    <p>Click or drag one or more PDFs here</p>
                 </div>
                 <div class="file-info" id="fileInfo">
-                    <strong id="fileName"></strong><br>
-                    <span id="pageCount"></span>
+                    <div id="fileList"></div>
+                    <div id="totalPageCount" style="margin-top: 0.5rem; color: var(--text-muted); font-size: 0.85rem;"></div>
                 </div>
             </div>
 

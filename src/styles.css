@@ -166,6 +166,57 @@ header p {
     position: relative;
 }
 
+.doc-separator {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    background: var(--surface);
+    border-left: 4px solid var(--primary);
+    padding: 0.6rem 0.9rem;
+    margin: 0.5rem 0 1rem;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.doc-separator .doc-name {
+    color: var(--text);
+    font-weight: 600;
+    word-break: break-all;
+}
+
+.doc-separator .doc-meta {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    margin-top: 0.2rem;
+}
+
+.doc-separator:not(:first-child) {
+    margin-top: 2rem;
+}
+
+.file-list-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.3rem 0;
+    font-size: 0.9rem;
+}
+
+.file-list-item .file-list-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+}
+
+.file-list-item .file-list-pages {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    flex-shrink: 0;
+}
+
 .page-preview canvas {
     width: 100%;
     border-radius: 4px;
