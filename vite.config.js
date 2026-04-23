@@ -34,9 +34,32 @@ function inlineTesseractPlugin() {
   };
 }
 
+// jspdf optionally dynamic-imports html2canvas for its .html() API which we
+// never use. Stub it so both the dev server and the production build succeed
+// without installing the (huge) html2canvas dependency.
+function stubHtml2Canvas() {
+  const VIRTUAL_ID = '\0virtual:html2canvas-stub';
+  return {
+    name: 'stub-html2canvas',
+    enforce: 'pre',
+    resolveId(id) {
+      if (id === 'html2canvas') return VIRTUAL_ID;
+    },
+    load(id) {
+      if (id === VIRTUAL_ID) {
+        return 'export default function() { throw new Error("html2canvas is not bundled"); }';
+      }
+    },
+  };
+}
+
 export default defineConfig({
   root: 'src',
+  server: {
+    host: true,
+  },
   plugins: [
+    stubHtml2Canvas(),
     inlineTesseractPlugin(),
     viteSingleFile({
       removeViteModuleLoader: true,
@@ -50,7 +73,6 @@ export default defineConfig({
     exclude: ['html2canvas'],
     esbuildOptions: {
       target: 'esnext',
-      external: ['html2canvas'],
     },
   },
   build: {
